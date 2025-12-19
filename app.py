@@ -1,0 +1,520 @@
+import streamlit as st
+import pandas as pd
+import sqlite3
+import json
+import time
+import re
+from datetime import datetime
+from PIL import Image
+import io
+import google.generativeai as genai
+
+# ==========================================
+# 0. 頁面配置 (物理鎖定樣式)
+# ==========================================
+st.set_page_config(page_title="'Amis/Pangcah AI", layout="wide", page_icon="🦅")
+
+# ==========================================
+# 1. 核心引擎 (物理鎖定)
+# ==========================================
+
+@st.cache_resource(show_spinner=False)
+def get_verified_models(api_key):
+    if not api_key: return []
+    try:
+        genai.configure(api_key=api_key)
+        # 列出所有支援 generateContent 的模型
+        ms = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 排序優化：優先把 flash 模型排在前面
+        ms.sort(key=lambda x: 0 if 'flash' in x else 1)
+        
+        return ms if ms else ["models/gemini-1.5-flash-latest"] # 萬一抓不到，給一個最新的預設值
+    except: return ["models/gemini-1.5-flash-latest"]
+
+def run_query(sql, params=(), fetch=False):
+    """資料庫執行引擎"""
+    try:
+        with sqlite3.connect('amis_data.db', timeout=30) as conn:
+            c = conn.cursor()
+            c.execute(sql, params)
+            if fetch: return c.fetchall()
+            conn.commit()
+            return True
+    except: return [] if fetch else False
+
+def reorder_ids(table):
+    """物理 ID 防撞重編"""
+    rows = run_query(f"SELECT rowid FROM {table} ORDER BY created_at ASC", fetch=True)
+    if not rows: return 0
+    for idx, (rid,) in enumerate(rows):
+        run_query(f"UPDATE {table} SET id = ? WHERE rowid = ?", (idx + 1, rid))
+    run_query(f"DELETE FROM sqlite_sequence WHERE name=?", (table,))
+    run_query(f"INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)", (table, len(rows)))
+    return len(rows)
+
+def sync_vocabulary(sentence):
+    """自動單字同步"""
+    words = re.findall(r"\w+", sentence.lower())
+    for word in words:
+        exists = run_query("SELECT id FROM vocabulary WHERE LOWER(amis) = ?", (word,), fetch=True)
+        if not exists:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            run_query("INSERT INTO vocabulary (amis, note, created_at) VALUES (?, ?, ?)", (word, f"來自句型: {sentence}", now))
+
+def is_linguistically_relevant(keyword, target_word):
+    """詞法過濾器"""
+    k = keyword.lower()
+    t = target_word.lower()
+    if k == t: return True
+    if t.startswith(k) or t.endswith(k): return True
+    if k in t:
+        if len(k) > 3: return True
+        else: return False 
+    return False
+
+def get_expert_knowledge(query_text, direction="AtoZ"):
+    """雙向 RAG 檢索邏輯"""
+    if not query_text: return None, [], [], "" 
+    clean_q = query_text.strip().rstrip('.?!')
+    
+    # 1. 精確句型檢索
+    if direction == "AtoZ":
+        sql = "SELECT output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(REPLACE(output_sentencepattern_amis, '.', '')) = ? LIMIT 1"
+    else:
+        sql = "SELECT output_sentencepattern_amis FROM sentence_pairs WHERE LOWER(output_sentencepattern_chinese) = ? LIMIT 1"
+    sentence_match = run_query(sql, (clean_q.lower(),), fetch=True)
+    full_trans = sentence_match[0][0] if sentence_match else None
+    
+    # 2. 關鍵字智能檢索
+    query_words = re.findall(r"\w+", query_text.lower())
+    words_data = []
+    sentences_data = [] 
+    rag_context_parts = []
+    
+    try:
+        with sqlite3.connect('amis_data.db') as conn:
+            for word in query_words:
+                # --- A. 抓單詞 ---
+                matched_definitions = [] 
+                if direction == "AtoZ":
+                    res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                else:
+                    res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE chinese LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                
+                valid_vocab_count = 0
+                for w in res_vocab:
+                    if direction == "AtoZ" and not is_linguistically_relevant(word, w[0]): continue 
+                    if valid_vocab_count >= 50: break 
+                    words_data.append({"amis": w[0], "chinese": w[1], "pos": w[2]})
+                    rag_context_parts.append(f"[阿美語資料庫] 阿美語: {w[0]} | 中文: {w[1]} (詞性: {w[2]})")
+                    if w[1]: matched_definitions.append(w[1])
+                    valid_vocab_count += 1
+
+                # --- B. 抓例句 ---
+                if direction == "AtoZ":
+                    res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(output_sentencepattern_amis) LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
+                else:
+                    res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE output_sentencepattern_chinese LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
+                
+                res_sent_semantic = []
+                if direction == "AtoZ" and matched_definitions:
+                    for distinct_def in list(set(matched_definitions))[:3]:
+                        core_def = distinct_def.split('(')[0].split('（')[0].strip()
+                        if len(core_def) > 0:
+                            found = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE output_sentencepattern_chinese LIKE ? LIMIT 20", (f"%{core_def}%",), fetch=True)
+                            res_sent_semantic.extend(found)
+
+                all_raw_sents = res_sent_direct + res_sent_semantic
+                valid_sent_count = 0
+                processed_sents = set()
+
+                for s in all_raw_sents:
+                    amis_s, chinese_s = s[0], s[1]
+                    if (amis_s, chinese_s) in processed_sents: continue
+                    processed_sents.add((amis_s, chinese_s))
+
+                    pass_check = False
+                    sent_words = re.findall(r"\w+", amis_s.lower())
+                    for sw in sent_words:
+                        if is_linguistically_relevant(word, sw): pass_check = True; break
+                    
+                    if not pass_check and direction == "AtoZ":
+                        for distinct_def in list(set(matched_definitions))[:3]:
+                             core_def = distinct_def.split('(')[0].split('（')[0].strip()
+                             if core_def and core_def in chinese_s: pass_check = True; break
+
+                    if not pass_check: continue
+
+                    if {"amis": amis_s, "chinese": chinese_s} not in sentences_data:
+                        if valid_sent_count >= 20: break
+                        sentences_data.append({"amis": amis_s, "chinese": chinese_s})
+                        rag_context_parts.append(f"[阿美語資料庫] 例句(阿美語): {amis_s} | (中文): {chinese_s}")
+                        valid_sent_count += 1
+    except: pass
+    
+    if len(rag_context_parts) > 80:
+        rag_context_parts = rag_context_parts[:80]
+        rag_context_parts.append("(System: 參考資料過多，已截取前 80 筆)")
+
+    rag_prompt = "\n【阿美語語料庫檢索結果 (Amis Corpus)】:\n" + "\n".join(set(rag_context_parts)) if rag_context_parts else ""
+    return full_trans, words_data, sentences_data, rag_prompt
+
+# ==========================================
+# 2. 介面模組
+# ==========================================
+
+def assistant_system(api_key, model_selection):
+    st.title("◎ AI 智慧翻譯機")
+    
+    DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (目標構建中)"
+    
+    # [模型代理邏輯修正] 
+    # 不再寫死 'models/gemini-1.5-flash'，而是動態抓取有效的模型列表
+    # 如果選了夢想模型，就用列表中的「第二個」模型 (因為第一個是夢想模型自己)
+    # 如果列表只有一個(夢想模型)，那也沒轍，只能報錯，但通常 get_verified_models 會保證有 fallback
+    
+    available_models = get_verified_models(api_key)
+    
+    if model_selection == DREAM_MODEL_NAME:
+        # 嘗試找一個可用的代理模型
+        proxy_model = "models/gemini-1.5-flash-latest" # 終極備案
+        
+        # 如果有抓到其他模型，就用抓到的 (排除掉夢想模型本身)
+        real_models = [m for m in available_models if "Pangcah" not in m]
+        if real_models:
+            proxy_model = real_models[0] # 挑第一個順眼的 (通常是 flash)
+            
+        st.info(f"🦅 **目標鎖定**：您選擇了未來的 Pangcah 模型！目前系統將由 **{proxy_model}** 代理執行，協助您累積訓練數據。")
+        actual_model = proxy_model
+    else:
+        actual_model = model_selection
+
+    mode = st.radio("翻譯方向", ["阿美語 ⮕ 中文", "中文 ⮕ 阿美語"], horizontal=True)
+    direction = "AtoZ" if mode == "阿美語 ⮕ 中文" else "ZtoA"
+    
+    if "rag_result" not in st.session_state: st.session_state.rag_result = None
+    if "last_query" not in st.session_state: st.session_state.last_query = ""
+
+    st.subheader("輸入文字")
+    with st.form("translation_search"):
+        q = st.text_area(f"在此輸入句子", height=150)
+        submit_search = st.form_submit_button("🚀 1. 查詢語料庫 (語意擴展搜尋)", type="primary")
+
+    if submit_search and q:
+        f, w, s, r = get_expert_knowledge(q, direction)
+        st.session_state.rag_result = (f, w, s, r)
+        st.session_state.last_query = q
+
+    st.divider()
+
+    st.subheader("翻譯結果 (語料庫優先)")
+    
+    if st.session_state.rag_result:
+        f, w, s, r = st.session_state.rag_result
+        
+        if f:
+            st.success(f"### 🏆 專家翻譯：\n**{f}**")
+        else:
+            st.info("ℹ️ 未找到完全匹配的句子，將依賴語料分析。")
+
+        if w:
+            with st.expander(f"📚 相關單詞 ({len(w)} 筆)", expanded=True):
+                for item in w: 
+                    st.markdown(f"- **{item['amis']}** ⮕ {item['chinese']} ({item['pos']})")
+        
+        if s:
+            with st.expander(f"🗣️ 相關例句 ({len(s)} 筆)", expanded=True):
+                for item in s:
+                    st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
+
+        if not w and not s:
+            st.warning("⚠️ 資料庫中未找到相關單詞或例句。")
+
+        st.divider()
+
+        total_refs = len(w) + len(s)
+        st.markdown("### 🤖 AI 協同分析")
+        st.write("語料資料已準備就緒。")
+        
+        btn_label = f"🦅 2. 請 {DREAM_MODEL_NAME.split(' ')[1]} 分析" if model_selection == DREAM_MODEL_NAME else "🦅 2. 是的，請 AI 分析"
+        
+        if st.button(btn_label):
+            if not api_key:
+                st.warning("請設定 API Key")
+            else:
+                try:
+                    status_container = st.empty()
+                    with st.spinner(f"正在呼叫 {actual_model} 進行運算..."):
+                        genai.configure(api_key=api_key)
+                        m = genai.GenerativeModel(actual_model)
+                        final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
+                        
+                        response = None
+                        retry_count = 0
+                        backoff_times = [5, 10, 20] 
+                        max_retries = len(backoff_times)
+                        
+                        while retry_count <= max_retries:
+                            try:
+                                response = m.generate_content(final_prompt)
+                                status_container.empty()
+                                break 
+                            except Exception as e_inner:
+                                if "429" in str(e_inner):
+                                    if retry_count < max_retries:
+                                        wait_time = backoff_times[retry_count]
+                                        status_container.warning(f"⚠️ 檢測到 API 擁塞 (429)。系統正在執行物理冷卻... (第 {retry_count+1}/{max_retries} 次重試，等待 {wait_time} 秒)")
+                                        time.sleep(wait_time)
+                                        retry_count += 1
+                                    else:
+                                        raise e_inner
+                                else:
+                                    raise e_inner
+
+                        if response:
+                            st.markdown("#### 🦅 AI 分析報告：")
+                            st.write(response.text)
+                        else:
+                            raise Exception("429 Resource Exhausted (重試耗盡)")
+
+                except Exception as e:
+                    err_msg = str(e)
+                    if "429" in err_msg:
+                        if "quota" in err_msg.lower():
+                            st.error("⚠️ 額度耗盡：您可能已達到今日免費額度上限。")
+                        else:
+                            st.error(f"⚠️ 物理限制：系統已嘗試冷卻但仍被拒絕。建議切換至 'models/gemini-1.5-flash'。")
+                            with st.expander("查看詳細錯誤代碼"):
+                                st.code(err_msg)
+                    else:
+                        st.error(f"⚠️ AI 錯誤：{err_msg}")
+
+# ==========================================
+# 3. 主控台
+# ==========================================
+
+def main():
+    with sqlite3.connect('amis_data.db') as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS sentence_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TIMESTAMP, output_sentencepattern_amis TEXT, output_sentencepattern_chinese TEXT, output_sentencepattern_english TEXT)')
+        conn.execute('CREATE TABLE IF NOT EXISTS vocabulary (id INTEGER PRIMARY KEY AUTOINCREMENT, amis TEXT, chinese TEXT, english TEXT, part_of_speech TEXT, note TEXT, created_at TIMESTAMP)')
+        conn.execute('CREATE TABLE IF NOT EXISTS pos_tags (tag_name TEXT PRIMARY KEY, sort_order INTEGER DEFAULT 0)')
+    
+    st.sidebar.title("🦅 系統選單")
+    
+    # --- [進階維護工具區] ---
+    with st.sidebar.expander("🔧 資料庫整形診所"):
+        st.write("請依序執行以下手術，移除舊版留下的多餘欄位：")
+        
+        if st.button("🛠️ 1. 執行：句型庫重構"):
+            try:
+                with sqlite3.connect('amis_data.db') as conn:
+                    conn.execute("ALTER TABLE sentence_pairs RENAME TO sentence_pairs_old_backup")
+                    conn.execute('CREATE TABLE sentence_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TIMESTAMP, output_sentencepattern_amis TEXT, output_sentencepattern_chinese TEXT, output_sentencepattern_english TEXT)')
+                    conn.execute("""INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) SELECT output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at FROM sentence_pairs_old_backup""")
+                    conn.execute("DROP TABLE sentence_pairs_old_backup")
+                    reorder_ids("sentence_pairs")
+                st.sidebar.success("✅ 句型庫修復完成！")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"修復失敗: {e}")
+                try: 
+                    with sqlite3.connect('amis_data.db') as conn: 
+                        conn.execute("DROP TABLE IF EXISTS sentence_pairs_old_backup")
+                except: pass
+
+        if st.button("🛠️ 2. 執行：單詞庫重構"):
+            try:
+                with sqlite3.connect('amis_data.db') as conn:
+                    conn.execute("ALTER TABLE vocabulary RENAME TO vocabulary_old_backup")
+                    conn.execute('CREATE TABLE vocabulary (id INTEGER PRIMARY KEY AUTOINCREMENT, amis TEXT, chinese TEXT, english TEXT, part_of_speech TEXT, note TEXT, created_at TIMESTAMP)')
+                    conn.execute("""INSERT INTO vocabulary (amis, chinese, english, part_of_speech, note, created_at) SELECT amis, chinese, english, part_of_speech, note, created_at FROM vocabulary_old_backup""")
+                    conn.execute("DROP TABLE vocabulary_old_backup")
+                    reorder_ids("vocabulary")
+                st.sidebar.success("✅ 單詞庫修復完成！")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"修復失敗: {e}")
+                try: 
+                    with sqlite3.connect('amis_data.db') as conn: 
+                        conn.execute("DROP TABLE IF EXISTS vocabulary_old_backup")
+                except: pass
+
+    key = st.sidebar.text_input("Google API Key", type="password", value=st.session_state.get("api_key", ""))
+    if key != st.session_state.get("api_key"): 
+        st.session_state["api_key"] = key; st.cache_resource.clear(); st.rerun()
+    
+    # 取得可用模型 (已內建 404 防呆)
+    raw_ms = get_verified_models(key)
+    ms = []
+    if raw_ms:
+        ms = raw_ms.copy()
+        DREAM_MODEL = "🧬 Pangcah/'Amis-language-model (目標構建中)"
+        ms.insert(0, DREAM_MODEL)
+    
+    model = st.sidebar.selectbox("請選擇 AI 模型", ms, index=0) if ms else None
+    
+    st.sidebar.divider()
+    page = st.sidebar.radio("功能模式", ["🏠 系統首頁", "◎ AI 智慧助理", "🔐 句型：專家資料庫", "📖 單詞：語料庫管理", "🏷️ 語法標籤管理", "🎓 語料匯出"])
+    
+    if page == "🏠 系統首頁":
+        st.write(""); st.write("")
+        cl, cm, cr = st.columns([1, 2, 1])
+        with cm:
+            st.markdown("<h1 style='text-align: center; font-size: 5rem;'>🦅</h1>", unsafe_allow_html=True)
+            st.markdown("<h1 style='text-align: center; letter-spacing: 5px;'>'Amis / Pangcah AI</h1>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center; color: gray;'>第一性原理語法協同推理框架</p>", unsafe_allow_html=True)
+            st.divider()
+            st.markdown("<p style='text-align: center;'>歡迎回來，船長。系統已就緒。</p>", unsafe_allow_html=True)
+
+    elif page == "◎ AI 智慧助理": assistant_system(key, model)
+
+    elif page == "🔐 句型：專家資料庫":
+        st.title("🔐 專家句型資料庫")
+        with st.form("add_new_s"):
+            c1, c2, c3 = st.columns(3); a, c, e = c1.text_input("阿美語"), c2.text_input("中文"), c3.text_input("英語")
+            if st.form_submit_button("➕ 儲存新句型"):
+                if a and c: 
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    run_query("INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) VALUES (?,?,?,?)", (a, c, e, now))
+                    sync_vocabulary(a); reorder_ids("sentence_pairs"); st.rerun()
+        st.divider()
+        with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
+        edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=True)
+        if st.button("💾 儲存修改"):
+            edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
+            reorder_ids("sentence_pairs"); st.rerun()
+
+    elif page == "📖 單詞：語料庫管理":
+        st.title("📖 單詞語料庫管理")
+        
+        raw_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
+        
+        priority_groups = [
+            "普通名詞 (commonnoun)", "專有名詞 (propernoun)", "複合名詞", 
+            "mi型動詞 (mi-type_verb)", "ma型動詞 (ma-type_verb)", "om型動詞 (om-type_verb)",
+            "形容詞 (adjective)", "副詞 (adverb)",
+            "人稱代名詞", "指示代名詞", 
+            "連接詞 (conjunction)", "助詞", "感嘆詞"
+        ]
+        
+        sorted_tags = []
+        for p_tag in priority_groups:
+            matched = [t for t in raw_tags if p_tag in t or t in p_tag] 
+            for m in matched:
+                if m not in sorted_tags: sorted_tags.append(m)
+        
+        remaining = sorted(list(set(raw_tags) - set(sorted_tags)))
+        final_pos_list = sorted_tags + remaining
+
+        with st.form("add_new_vocab"):
+            c1, c2, c3, c4 = st.columns([2, 2, 2, 3])
+            a_in, c_in, e_in = c1.text_input("阿美語"), c2.text_input("中文"), c3.text_input("英語")
+            p_in = c4.selectbox("詞類", options=final_pos_list)
+            
+            if st.form_submit_button("➕ 儲存新單詞"):
+                if a_in:
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    run_query("INSERT INTO vocabulary (amis, chinese, english, part_of_speech, created_at) VALUES (?,?,?,?,?)", (a_in, c_in, e_in, p_in, now))
+                    reorder_ids("vocabulary"); st.rerun()
+        
+        st.divider()
+        with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
+        edited_df = st.data_editor(
+            df, 
+            use_container_width=True, 
+            num_rows="dynamic", 
+            column_config={
+                "part_of_speech": st.column_config.SelectboxColumn("詞類", options=final_pos_list, required=True)
+            }
+        )
+        if st.button("💾 儲存修改"):
+            edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
+            reorder_ids("vocabulary"); st.rerun()
+
+    elif page == "🏷️ 語法標籤管理":
+        st.title("🏷️ 標籤管理")
+        
+        with st.expander("⚡ 智慧更名工具 (連動更新單詞)", expanded=True):
+            st.caption("在此修改標籤名稱，系統會自動更新所有使用該標籤的單詞。")
+            current_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
+            
+            c1, c2 = st.columns(2)
+            old_tag = c1.selectbox("選擇要修改的舊標籤", options=current_tags)
+            new_tag_name = c2.text_input("輸入新名稱")
+            
+            if st.button("🔄 執行更名與連動更新"):
+                if old_tag and new_tag_name and old_tag != new_tag_name:
+                    try:
+                        with sqlite3.connect('amis_data.db') as conn:
+                            conn.execute("UPDATE vocabulary SET part_of_speech = ? WHERE part_of_speech = ?", (new_tag_name, old_tag))
+                            conn.execute("INSERT OR IGNORE INTO pos_tags (tag_name) VALUES (?)", (new_tag_name,))
+                            conn.execute("DELETE FROM pos_tags WHERE tag_name = ?", (old_tag,))
+                            
+                        st.success(f"✅ 成功將 '{old_tag}' 更名為 '{new_tag_name}'，並更新了相關單詞！")
+                        time.sleep(1.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"更新失敗: {e}")
+                else:
+                    st.warning("請輸入有效的新名稱，且不能與舊名稱相同。")
+
+        st.divider()
+        st.subheader("標籤列表")
+        
+        with st.form("t"):
+            nt = st.text_input("新增標籤名稱")
+            if st.form_submit_button("新增"): run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,)); st.rerun()
+        
+        with sqlite3.connect('amis_data.db') as conn: df_tags = pd.read_sql("SELECT * FROM pos_tags ORDER BY sort_order ASC", conn)
+        if 'sort_order' in df_tags.columns: df_tags = df_tags.drop(columns=['sort_order'])
+        
+        et = st.data_editor(df_tags, use_container_width=True, num_rows="dynamic")
+        if st.button("💾 儲存列表修改"):
+            with sqlite3.connect('amis_data.db') as conn: et.to_sql('pos_tags', conn, if_exists='replace', index=False)
+            st.success("✅ 標籤已存檔！"); st.rerun()
+
+    elif page == "🎓 語料匯出":
+        st.title("🎓 語料匯出與戰略進度")
+        
+        with st.container():
+            st.info("🗺️ **AI 戰略發展路線圖 (Roadmap)**")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("### 🚩 第一階段 (目前)")
+                st.caption("RAG 檢索增強生成")
+                st.write("✅ **Python 採礦機**\n✅ **Gemini 廚師**\n🛠️ **目標**：持續擴充語料庫。")
+            with c2:
+                st.markdown("### 🏔️ 第二階段 (1,000+)")
+                st.caption("模型微調 (Fine-tuning)")
+                st.write("🔄 **特訓小模型**\n🧠 **內化知識**：AI 開始懂阿美語。")
+            with c3:
+                st.markdown("### 🏰 第三階段 (10,000+)")
+                st.caption("完全自主 (Local LLM)")
+                st.write("💻 **本地端大腦**\n🦅 **終極目標**：脫離網路與 API。")
+        
+        st.divider()
+        st.subheader("📥 資料預覽與匯出")
+        
+        tab1, tab2 = st.tabs(["📝 句型庫 (Sentences)", "📖 單詞庫 (Vocabulary)"])
+        
+        with tab1:
+            with sqlite3.connect('amis_data.db') as conn:
+                df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
+            st.caption(f"📊 目前句型庫存量：**{len(df)}** 筆")
+            if len(df) > 0: st.progress(min(1.0, len(df) / 1000))
+            st.dataframe(df, use_container_width=True)
+            st.download_button("📥 下載句型 JSONL", df.to_json(orient="records", lines=True, force_ascii=False), "amis_sentences.jsonl")
+
+        with tab2:
+            with sqlite3.connect('amis_data.db') as conn:
+                df_v = pd.read_sql("SELECT * FROM vocabulary", conn)
+            st.caption(f"📊 目前單詞庫存量：**{len(df_v)}** 筆")
+            st.dataframe(df_v, use_container_width=True)
+            st.download_button("📥 下載單詞 JSONL", df_v.to_json(orient="records", lines=True, force_ascii=False), "amis_vocabulary.jsonl")
+
+if __name__ == "__main__": main()
