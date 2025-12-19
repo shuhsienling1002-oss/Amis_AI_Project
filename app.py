@@ -8,7 +8,7 @@ from datetime import datetime
 from PIL import Image
 import io
 import google.generativeai as genai
-from github import Github  # [新增] 引入 GitHub 套件
+from github import Github
 
 # ==========================================
 # 0. 頁面配置 (物理鎖定樣式)
@@ -81,7 +81,6 @@ def backup_to_github():
     try:
         g = Github(token)
         # 這裡請改為您的 GitHub 帳號與倉庫名稱
-        # 例如: shuhsienling1002-oss/Amis_AI_Project
         repo_name = "shuhsienling1002-oss/Amis_AI_Project" 
         repo = g.get_repo(repo_name)
         
@@ -96,7 +95,7 @@ def backup_to_github():
             st.toast("☁️ 雲端備份成功！資料已同步到 GitHub。", icon="✅")
             return True
         except:
-            # 如果檔案不存在（理論上不可能），則創建新檔案
+            # 如果檔案不存在，則創建新檔案
             repo.create_file(file_path, f"Init db: {datetime.now()}", content)
             st.toast("☁️ 雲端備份成功！(新檔案)", icon="✅")
             return True
@@ -288,9 +287,14 @@ def main():
                     conn.execute("""INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) SELECT output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at FROM sentence_pairs_old_backup""")
                     conn.execute("DROP TABLE sentence_pairs_old_backup")
                     reorder_ids("sentence_pairs")
-                st.sidebar.success("✅ 句型庫修復完成！"); time.sleep(1); st.rerun()
+                st.sidebar.success("✅ 句型庫修復完成！")
+                time.sleep(1)
+                st.rerun()
             except Exception as e:
-                st.sidebar.error(f"修復失敗: {e}"); try: with sqlite3.connect('amis_data.db') as conn: conn.execute("DROP TABLE IF EXISTS sentence_pairs_old_backup")
+                st.sidebar.error(f"修復失敗: {e}")
+                try: 
+                    with sqlite3.connect('amis_data.db') as conn: 
+                        conn.execute("DROP TABLE IF EXISTS sentence_pairs_old_backup")
                 except: pass
 
         if st.button("🛠️ 2. 執行：單詞庫重構"):
@@ -301,9 +305,14 @@ def main():
                     conn.execute("""INSERT INTO vocabulary (amis, chinese, english, part_of_speech, note, created_at) SELECT amis, chinese, english, part_of_speech, note, created_at FROM vocabulary_old_backup""")
                     conn.execute("DROP TABLE vocabulary_old_backup")
                     reorder_ids("vocabulary")
-                st.sidebar.success("✅ 單詞庫修復完成！"); time.sleep(1); st.rerun()
+                st.sidebar.success("✅ 單詞庫修復完成！")
+                time.sleep(1)
+                st.rerun()
             except Exception as e:
-                st.sidebar.error(f"修復失敗: {e}"); try: with sqlite3.connect('amis_data.db') as conn: conn.execute("DROP TABLE IF EXISTS vocabulary_old_backup")
+                st.sidebar.error(f"修復失敗: {e}")
+                try: 
+                    with sqlite3.connect('amis_data.db') as conn: 
+                        conn.execute("DROP TABLE IF EXISTS vocabulary_old_backup")
                 except: pass
 
     key = st.sidebar.text_input("Google API Key", type="password", value=st.session_state.get("api_key", ""))
