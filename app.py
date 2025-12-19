@@ -23,13 +23,9 @@ def get_verified_models(api_key):
     if not api_key: return []
     try:
         genai.configure(api_key=api_key)
-        # 列出所有支援 generateContent 的模型
         ms = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 排序優化：優先把 flash 模型排在前面
         ms.sort(key=lambda x: 0 if 'flash' in x else 1)
-        
-        return ms if ms else ["models/gemini-1.5-flash-latest"] # 萬一抓不到，給一個最新的預設值
+        return ms if ms else ["models/gemini-1.5-flash-latest"]
     except: return ["models/gemini-1.5-flash-latest"]
 
 def run_query(sql, params=(), fetch=False):
@@ -169,21 +165,13 @@ def assistant_system(api_key, model_selection):
     
     DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (目標構建中)"
     
-    # [模型代理邏輯修正] 
-    # 不再寫死 'models/gemini-1.5-flash'，而是動態抓取有效的模型列表
-    # 如果選了夢想模型，就用列表中的「第二個」模型 (因為第一個是夢想模型自己)
-    # 如果列表只有一個(夢想模型)，那也沒轍，只能報錯，但通常 get_verified_models 會保證有 fallback
-    
     available_models = get_verified_models(api_key)
     
     if model_selection == DREAM_MODEL_NAME:
-        # 嘗試找一個可用的代理模型
-        proxy_model = "models/gemini-1.5-flash-latest" # 終極備案
-        
-        # 如果有抓到其他模型，就用抓到的 (排除掉夢想模型本身)
+        proxy_model = "models/gemini-1.5-flash-latest" 
         real_models = [m for m in available_models if "Pangcah" not in m]
         if real_models:
-            proxy_model = real_models[0] # 挑第一個順眼的 (通常是 flash)
+            proxy_model = real_models[0] 
             
         st.info(f"🦅 **目標鎖定**：您選擇了未來的 Pangcah 模型！目前系統將由 **{proxy_model}** 代理執行，協助您累積訓練數據。")
         actual_model = proxy_model
@@ -302,7 +290,6 @@ def main():
     
     st.sidebar.title("🦅 系統選單")
     
-    # --- [進階維護工具區] ---
     with st.sidebar.expander("🔧 資料庫整形診所"):
         st.write("請依序執行以下手術，移除舊版留下的多餘欄位：")
         
@@ -346,7 +333,6 @@ def main():
     if key != st.session_state.get("api_key"): 
         st.session_state["api_key"] = key; st.cache_resource.clear(); st.rerun()
     
-    # 取得可用模型 (已內建 404 防呆)
     raw_ms = get_verified_models(key)
     ms = []
     if raw_ms:
@@ -470,13 +456,35 @@ def main():
             nt = st.text_input("新增標籤名稱")
             if st.form_submit_button("新增"): run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,)); st.rerun()
         
-        with sqlite3.connect('amis_data.db') as conn: df_tags = pd.read_sql("SELECT * FROM pos_tags ORDER BY sort_order ASC", conn)
-        if 'sort_order' in df_tags.columns: df_tags = df_tags.drop(columns=['sort_order'])
+        # [關鍵修正] 1. 讀取時不強求 sort_order，避免崩潰
+        with sqlite3.connect('amis_data.db') as conn: 
+            # 嘗試讀取，如果出錯就用簡單讀取
+            try:
+                df_tags = pd.read_sql("SELECT * FROM pos_tags", conn)
+            except:
+                st.error("資料庫讀取異常，正在嘗試重置...")
+                df_tags = pd.DataFrame(columns=['tag_name'])
+
+        # [關鍵修正] 2. 如果 sort_order 消失了(因為之前的 bug)，我們手動加回來
+        if 'sort_order' not in df_tags.columns:
+            df_tags['sort_order'] = 0
+            
+        # 3. 畫面顯示 (這裡把 sort_order 藏起來，不給使用者看，避免眼花)
+        et = st.data_editor(
+            df_tags, 
+            use_container_width=True, 
+            num_rows="dynamic",
+            column_config={
+                "sort_order": None # 這招可以把它在介面上隱藏，但資料還在
+            }
+        )
         
-        et = st.data_editor(df_tags, use_container_width=True, num_rows="dynamic")
         if st.button("💾 儲存列表修改"):
-            with sqlite3.connect('amis_data.db') as conn: et.to_sql('pos_tags', conn, if_exists='replace', index=False)
-            st.success("✅ 標籤已存檔！"); st.rerun()
+            # 4. 存檔時，因為 et 裡面已經包含了 (被隱藏的) sort_order 欄位 (值為 0)
+            # 所以這裡寫回去時，就會連同欄位一起修復回資料庫！
+            with sqlite3.connect('amis_data.db') as conn: 
+                et.to_sql('pos_tags', conn, if_exists='replace', index=False)
+            st.success("✅ 標籤已存檔！(資料庫結構已自動修復)"); st.rerun()
 
     elif page == "🎓 語料匯出":
         st.title("🎓 語料匯出與戰略進度")
