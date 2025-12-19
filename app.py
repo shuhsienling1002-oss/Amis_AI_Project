@@ -8,6 +8,7 @@ from datetime import datetime
 from PIL import Image
 import io
 import google.generativeai as genai
+from github import Github  # [新增] 引入 GitHub 套件
 
 # ==========================================
 # 0. 頁面配置 (物理鎖定樣式)
@@ -69,12 +70,45 @@ def is_linguistically_relevant(keyword, target_word):
         else: return False 
     return False
 
+# [新增] 雲端備份功能
+def backup_to_github():
+    """將目前的資料庫推送到 GitHub"""
+    token = st.secrets.get("GITHUB_TOKEN")
+    if not token:
+        st.error("❌ 未設定 GitHub Token，無法備份！請在 Secrets 中設定。")
+        return False
+    
+    try:
+        g = Github(token)
+        # 這裡請改為您的 GitHub 帳號與倉庫名稱
+        # 例如: shuhsienling1002-oss/Amis_AI_Project
+        repo_name = "shuhsienling1002-oss/Amis_AI_Project" 
+        repo = g.get_repo(repo_name)
+        
+        file_path = "amis_data.db"
+        with open(file_path, "rb") as f:
+            content = f.read()
+        
+        # 嘗試取得現有檔案以進行更新
+        try:
+            contents = repo.get_contents(file_path)
+            repo.update_file(contents.path, f"Mobile update: {datetime.now()}", content, contents.sha)
+            st.toast("☁️ 雲端備份成功！資料已同步到 GitHub。", icon="✅")
+            return True
+        except:
+            # 如果檔案不存在（理論上不可能），則創建新檔案
+            repo.create_file(file_path, f"Init db: {datetime.now()}", content)
+            st.toast("☁️ 雲端備份成功！(新檔案)", icon="✅")
+            return True
+    except Exception as e:
+        st.error(f"⚠️ 備份失敗: {e}")
+        return False
+
 def get_expert_knowledge(query_text, direction="AtoZ"):
     """雙向 RAG 檢索邏輯"""
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
     
-    # 1. 精確句型檢索
     if direction == "AtoZ":
         sql = "SELECT output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(REPLACE(output_sentencepattern_amis, '.', '')) = ? LIMIT 1"
     else:
@@ -82,7 +116,6 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
     sentence_match = run_query(sql, (clean_q.lower(),), fetch=True)
     full_trans = sentence_match[0][0] if sentence_match else None
     
-    # 2. 關鍵字智能檢索
     query_words = re.findall(r"\w+", query_text.lower())
     words_data = []
     sentences_data = [] 
@@ -91,7 +124,6 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
     try:
         with sqlite3.connect('amis_data.db') as conn:
             for word in query_words:
-                # --- A. 抓單詞 ---
                 matched_definitions = [] 
                 if direction == "AtoZ":
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
@@ -107,7 +139,6 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                     if w[1]: matched_definitions.append(w[1])
                     valid_vocab_count += 1
 
-                # --- B. 抓例句 ---
                 if direction == "AtoZ":
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(output_sentencepattern_amis) LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
                 else:
@@ -164,15 +195,12 @@ def assistant_system(api_key, model_selection):
     st.title("◎ AI 智慧翻譯機")
     
     DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (目標構建中)"
-    
     available_models = get_verified_models(api_key)
     
     if model_selection == DREAM_MODEL_NAME:
         proxy_model = "models/gemini-1.5-flash-latest" 
         real_models = [m for m in available_models if "Pangcah" not in m]
-        if real_models:
-            proxy_model = real_models[0] 
-            
+        if real_models: proxy_model = real_models[0] 
         st.info(f"🦅 **目標鎖定**：您選擇了未來的 Pangcah 模型！目前系統將由 **{proxy_model}** 代理執行，協助您累積訓練數據。")
         actual_model = proxy_model
     else:
@@ -195,41 +223,30 @@ def assistant_system(api_key, model_selection):
         st.session_state.last_query = q
 
     st.divider()
-
     st.subheader("翻譯結果 (語料庫優先)")
     
     if st.session_state.rag_result:
         f, w, s, r = st.session_state.rag_result
-        
-        if f:
-            st.success(f"### 🏆 專家翻譯：\n**{f}**")
-        else:
-            st.info("ℹ️ 未找到完全匹配的句子，將依賴語料分析。")
+        if f: st.success(f"### 🏆 專家翻譯：\n**{f}**")
+        else: st.info("ℹ️ 未找到完全匹配的句子，將依賴語料分析。")
 
         if w:
             with st.expander(f"📚 相關單詞 ({len(w)} 筆)", expanded=True):
-                for item in w: 
-                    st.markdown(f"- **{item['amis']}** ⮕ {item['chinese']} ({item['pos']})")
-        
+                for item in w: st.markdown(f"- **{item['amis']}** ⮕ {item['chinese']} ({item['pos']})")
         if s:
             with st.expander(f"🗣️ 相關例句 ({len(s)} 筆)", expanded=True):
-                for item in s:
-                    st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
+                for item in s: st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
 
-        if not w and not s:
-            st.warning("⚠️ 資料庫中未找到相關單詞或例句。")
+        if not w and not s: st.warning("⚠️ 資料庫中未找到相關單詞或例句。")
 
         st.divider()
-
-        total_refs = len(w) + len(s)
         st.markdown("### 🤖 AI 協同分析")
         st.write("語料資料已準備就緒。")
         
         btn_label = f"🦅 2. 請 {DREAM_MODEL_NAME.split(' ')[1]} 分析" if model_selection == DREAM_MODEL_NAME else "🦅 2. 是的，請 AI 分析"
         
         if st.button(btn_label):
-            if not api_key:
-                st.warning("請設定 API Key")
+            if not api_key: st.warning("請設定 API Key")
             else:
                 try:
                     status_container = st.empty()
@@ -237,46 +254,11 @@ def assistant_system(api_key, model_selection):
                         genai.configure(api_key=api_key)
                         m = genai.GenerativeModel(actual_model)
                         final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
-                        
-                        response = None
-                        retry_count = 0
-                        backoff_times = [5, 10, 20] 
-                        max_retries = len(backoff_times)
-                        
-                        while retry_count <= max_retries:
-                            try:
-                                response = m.generate_content(final_prompt)
-                                status_container.empty()
-                                break 
-                            except Exception as e_inner:
-                                if "429" in str(e_inner):
-                                    if retry_count < max_retries:
-                                        wait_time = backoff_times[retry_count]
-                                        status_container.warning(f"⚠️ 檢測到 API 擁塞 (429)。系統正在執行物理冷卻... (第 {retry_count+1}/{max_retries} 次重試，等待 {wait_time} 秒)")
-                                        time.sleep(wait_time)
-                                        retry_count += 1
-                                    else:
-                                        raise e_inner
-                                else:
-                                    raise e_inner
-
+                        response = m.generate_content(final_prompt)
                         if response:
                             st.markdown("#### 🦅 AI 分析報告：")
                             st.write(response.text)
-                        else:
-                            raise Exception("429 Resource Exhausted (重試耗盡)")
-
-                except Exception as e:
-                    err_msg = str(e)
-                    if "429" in err_msg:
-                        if "quota" in err_msg.lower():
-                            st.error("⚠️ 額度耗盡：您可能已達到今日免費額度上限。")
-                        else:
-                            st.error(f"⚠️ 物理限制：系統已嘗試冷卻但仍被拒絕。建議切換至 'models/gemini-1.5-flash'。")
-                            with st.expander("查看詳細錯誤代碼"):
-                                st.code(err_msg)
-                    else:
-                        st.error(f"⚠️ AI 錯誤：{err_msg}")
+                except Exception as e: st.error(f"⚠️ AI 錯誤：{e}")
 
 # ==========================================
 # 3. 主控台
@@ -290,9 +272,14 @@ def main():
     
     st.sidebar.title("🦅 系統選單")
     
+    # [新增] 雲端同步按鈕
+    with st.sidebar.container():
+        st.info("☁️ **行動同步中心**")
+        if st.button("🔄 立即將資料備份回 GitHub", type="primary"):
+            with st.spinner("正在連線 GitHub..."):
+                backup_to_github()
+    
     with st.sidebar.expander("🔧 資料庫整形診所"):
-        st.write("請依序執行以下手術，移除舊版留下的多餘欄位：")
-        
         if st.button("🛠️ 1. 執行：句型庫重構"):
             try:
                 with sqlite3.connect('amis_data.db') as conn:
@@ -301,14 +288,9 @@ def main():
                     conn.execute("""INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) SELECT output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at FROM sentence_pairs_old_backup""")
                     conn.execute("DROP TABLE sentence_pairs_old_backup")
                     reorder_ids("sentence_pairs")
-                st.sidebar.success("✅ 句型庫修復完成！")
-                time.sleep(1)
-                st.rerun()
+                st.sidebar.success("✅ 句型庫修復完成！"); time.sleep(1); st.rerun()
             except Exception as e:
-                st.sidebar.error(f"修復失敗: {e}")
-                try: 
-                    with sqlite3.connect('amis_data.db') as conn: 
-                        conn.execute("DROP TABLE IF EXISTS sentence_pairs_old_backup")
+                st.sidebar.error(f"修復失敗: {e}"); try: with sqlite3.connect('amis_data.db') as conn: conn.execute("DROP TABLE IF EXISTS sentence_pairs_old_backup")
                 except: pass
 
         if st.button("🛠️ 2. 執行：單詞庫重構"):
@@ -319,14 +301,9 @@ def main():
                     conn.execute("""INSERT INTO vocabulary (amis, chinese, english, part_of_speech, note, created_at) SELECT amis, chinese, english, part_of_speech, note, created_at FROM vocabulary_old_backup""")
                     conn.execute("DROP TABLE vocabulary_old_backup")
                     reorder_ids("vocabulary")
-                st.sidebar.success("✅ 單詞庫修復完成！")
-                time.sleep(1)
-                st.rerun()
+                st.sidebar.success("✅ 單詞庫修復完成！"); time.sleep(1); st.rerun()
             except Exception as e:
-                st.sidebar.error(f"修復失敗: {e}")
-                try: 
-                    with sqlite3.connect('amis_data.db') as conn: 
-                        conn.execute("DROP TABLE IF EXISTS vocabulary_old_backup")
+                st.sidebar.error(f"修復失敗: {e}"); try: with sqlite3.connect('amis_data.db') as conn: conn.execute("DROP TABLE IF EXISTS vocabulary_old_backup")
                 except: pass
 
     key = st.sidebar.text_input("Google API Key", type="password", value=st.session_state.get("api_key", ""))
@@ -365,34 +342,28 @@ def main():
                 if a and c: 
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     run_query("INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) VALUES (?,?,?,?)", (a, c, e, now))
-                    sync_vocabulary(a); reorder_ids("sentence_pairs"); st.rerun()
+                    sync_vocabulary(a); reorder_ids("sentence_pairs"); 
+                    backup_to_github() # [新增] 自動備份
+                    st.rerun()
         st.divider()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=True)
-        if st.button("💾 儲存修改"):
+        if st.button("💾 儲存修改 (並備份到雲端)"):
             edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
-            reorder_ids("sentence_pairs"); st.rerun()
+            reorder_ids("sentence_pairs"); 
+            backup_to_github() # [新增] 自動備份
+            st.rerun()
 
     elif page == "📖 單詞：語料庫管理":
         st.title("📖 單詞語料庫管理")
-        
         raw_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
-        
-        priority_groups = [
-            "普通名詞 (commonnoun)", "專有名詞 (propernoun)", "複合名詞", 
-            "mi型動詞 (mi-type_verb)", "ma型動詞 (ma-type_verb)", "om型動詞 (om-type_verb)",
-            "形容詞 (adjective)", "副詞 (adverb)",
-            "人稱代名詞", "指示代名詞", 
-            "連接詞 (conjunction)", "助詞", "感嘆詞"
-        ]
-        
+        priority_groups = ["普通名詞 (commonnoun)", "專有名詞 (propernoun)", "複合名詞", "mi型動詞 (mi-type_verb)", "ma型動詞 (ma-type_verb)", "om型動詞 (om-type_verb)", "形容詞 (adjective)", "副詞 (adverb)", "人稱代名詞", "指示代名詞", "連接詞 (conjunction)", "助詞", "感嘆詞"]
         sorted_tags = []
         for p_tag in priority_groups:
             matched = [t for t in raw_tags if p_tag in t or t in p_tag] 
             for m in matched:
                 if m not in sorted_tags: sorted_tags.append(m)
-        
         remaining = sorted(list(set(raw_tags) - set(sorted_tags)))
         final_pos_list = sorted_tags + remaining
 
@@ -405,34 +376,30 @@ def main():
                 if a_in:
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     run_query("INSERT INTO vocabulary (amis, chinese, english, part_of_speech, created_at) VALUES (?,?,?,?,?)", (a_in, c_in, e_in, p_in, now))
-                    reorder_ids("vocabulary"); st.rerun()
+                    reorder_ids("vocabulary"); 
+                    backup_to_github() # [新增] 自動備份
+                    st.rerun()
         
         st.divider()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
         edited_df = st.data_editor(
-            df, 
-            use_container_width=True, 
-            num_rows="dynamic", 
-            column_config={
-                "part_of_speech": st.column_config.SelectboxColumn("詞類", options=final_pos_list, required=True)
-            }
+            df, use_container_width=True, num_rows="dynamic", 
+            column_config={"part_of_speech": st.column_config.SelectboxColumn("詞類", options=final_pos_list, required=True)}
         )
-        if st.button("💾 儲存修改"):
+        if st.button("💾 儲存修改 (並備份到雲端)"):
             edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
-            reorder_ids("vocabulary"); st.rerun()
+            reorder_ids("vocabulary"); 
+            backup_to_github() # [新增] 自動備份
+            st.rerun()
 
     elif page == "🏷️ 語法標籤管理":
         st.title("🏷️ 標籤管理")
-        
         with st.expander("⚡ 智慧更名工具 (連動更新單詞)", expanded=True):
-            st.caption("在此修改標籤名稱，系統會自動更新所有使用該標籤的單詞。")
             current_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
-            
             c1, c2 = st.columns(2)
             old_tag = c1.selectbox("選擇要修改的舊標籤", options=current_tags)
             new_tag_name = c2.text_input("輸入新名稱")
-            
             if st.button("🔄 執行更名與連動更新"):
                 if old_tag and new_tag_name and old_tag != new_tag_name:
                     try:
@@ -440,89 +407,51 @@ def main():
                             conn.execute("UPDATE vocabulary SET part_of_speech = ? WHERE part_of_speech = ?", (new_tag_name, old_tag))
                             conn.execute("INSERT OR IGNORE INTO pos_tags (tag_name) VALUES (?)", (new_tag_name,))
                             conn.execute("DELETE FROM pos_tags WHERE tag_name = ?", (old_tag,))
-                            
                         st.success(f"✅ 成功將 '{old_tag}' 更名為 '{new_tag_name}'，並更新了相關單詞！")
-                        time.sleep(1.5)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"更新失敗: {e}")
-                else:
-                    st.warning("請輸入有效的新名稱，且不能與舊名稱相同。")
+                        backup_to_github() # [新增] 自動備份
+                        time.sleep(1.5); st.rerun()
+                    except Exception as e: st.error(f"更新失敗: {e}")
+                else: st.warning("請輸入有效的新名稱。")
 
         st.divider()
         st.subheader("標籤列表")
-        
         with st.form("t"):
             nt = st.text_input("新增標籤名稱")
-            if st.form_submit_button("新增"): run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,)); st.rerun()
+            if st.form_submit_button("新增"): 
+                run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,))
+                backup_to_github() # [新增] 自動備份
+                st.rerun()
         
-        # [關鍵修正] 1. 讀取時不強求 sort_order，避免崩潰
         with sqlite3.connect('amis_data.db') as conn: 
-            # 嘗試讀取，如果出錯就用簡單讀取
-            try:
-                df_tags = pd.read_sql("SELECT * FROM pos_tags", conn)
-            except:
-                st.error("資料庫讀取異常，正在嘗試重置...")
-                df_tags = pd.DataFrame(columns=['tag_name'])
-
-        # [關鍵修正] 2. 如果 sort_order 消失了(因為之前的 bug)，我們手動加回來
-        if 'sort_order' not in df_tags.columns:
-            df_tags['sort_order'] = 0
-            
-        # 3. 畫面顯示 (這裡把 sort_order 藏起來，不給使用者看，避免眼花)
-        et = st.data_editor(
-            df_tags, 
-            use_container_width=True, 
-            num_rows="dynamic",
-            column_config={
-                "sort_order": None # 這招可以把它在介面上隱藏，但資料還在
-            }
-        )
+            try: df_tags = pd.read_sql("SELECT * FROM pos_tags", conn)
+            except: df_tags = pd.DataFrame(columns=['tag_name'])
         
+        if 'sort_order' not in df_tags.columns: df_tags['sort_order'] = 0
+        et = st.data_editor(df_tags, use_container_width=True, num_rows="dynamic", column_config={"sort_order": None})
         if st.button("💾 儲存列表修改"):
-            # 4. 存檔時，因為 et 裡面已經包含了 (被隱藏的) sort_order 欄位 (值為 0)
-            # 所以這裡寫回去時，就會連同欄位一起修復回資料庫！
-            with sqlite3.connect('amis_data.db') as conn: 
-                et.to_sql('pos_tags', conn, if_exists='replace', index=False)
-            st.success("✅ 標籤已存檔！(資料庫結構已自動修復)"); st.rerun()
+            with sqlite3.connect('amis_data.db') as conn: et.to_sql('pos_tags', conn, if_exists='replace', index=False)
+            backup_to_github() # [新增] 自動備份
+            st.success("✅ 標籤已存檔！"); st.rerun()
 
     elif page == "🎓 語料匯出":
         st.title("🎓 語料匯出與戰略進度")
-        
         with st.container():
             st.info("🗺️ **AI 戰略發展路線圖 (Roadmap)**")
             c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("### 🚩 第一階段 (目前)")
-                st.caption("RAG 檢索增強生成")
-                st.write("✅ **Python 採礦機**\n✅ **Gemini 廚師**\n🛠️ **目標**：持續擴充語料庫。")
-            with c2:
-                st.markdown("### 🏔️ 第二階段 (1,000+)")
-                st.caption("模型微調 (Fine-tuning)")
-                st.write("🔄 **特訓小模型**\n🧠 **內化知識**：AI 開始懂阿美語。")
-            with c3:
-                st.markdown("### 🏰 第三階段 (10,000+)")
-                st.caption("完全自主 (Local LLM)")
-                st.write("💻 **本地端大腦**\n🦅 **終極目標**：脫離網路與 API。")
+            with c1: st.markdown("### 🚩 第一階段 (目前)"); st.caption("RAG 檢索增強生成"); st.write("✅ **Python 採礦機**\n✅ **Gemini 廚師**\n🛠️ **目標**：持續擴充語料庫。")
+            with c2: st.markdown("### 🏔️ 第二階段 (1,000+)")
+            with c3: st.markdown("### 🏰 第三階段 (10,000+)")
         
         st.divider()
         st.subheader("📥 資料預覽與匯出")
-        
         tab1, tab2 = st.tabs(["📝 句型庫 (Sentences)", "📖 單詞庫 (Vocabulary)"])
-        
         with tab1:
-            with sqlite3.connect('amis_data.db') as conn:
-                df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
-            st.caption(f"📊 目前句型庫存量：**{len(df)}** 筆")
-            if len(df) > 0: st.progress(min(1.0, len(df) / 1000))
-            st.dataframe(df, use_container_width=True)
+            with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
+            st.caption(f"📊 目前句型庫存量：**{len(df)}** 筆"); st.dataframe(df, use_container_width=True)
             st.download_button("📥 下載句型 JSONL", df.to_json(orient="records", lines=True, force_ascii=False), "amis_sentences.jsonl")
-
         with tab2:
-            with sqlite3.connect('amis_data.db') as conn:
-                df_v = pd.read_sql("SELECT * FROM vocabulary", conn)
-            st.caption(f"📊 目前單詞庫存量：**{len(df_v)}** 筆")
-            st.dataframe(df_v, use_container_width=True)
+            with sqlite3.connect('amis_data.db') as conn: df_v = pd.read_sql("SELECT * FROM vocabulary", conn)
+            st.caption(f"📊 目前單詞庫存量：**{len(df_v)}** 筆"); st.dataframe(df_v, use_container_width=True)
             st.download_button("📥 下載單詞 JSONL", df_v.to_json(orient="records", lines=True, force_ascii=False), "amis_vocabulary.jsonl")
 
 if __name__ == "__main__": main()
