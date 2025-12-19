@@ -324,6 +324,8 @@ def main():
     elif page == "📖 單詞：語料庫管理":
         st.title("📖 單詞語料庫管理")
         raw_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
+        
+        # [恢復] 頂部輸入區面板
         with st.form("add_new_vocab"):
             c1, c2, c4 = st.columns([2, 2, 3])
             a_in, c_in = c1.text_input("阿美語"), c2.text_input("中文")
@@ -333,8 +335,27 @@ def main():
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     run_query("INSERT INTO vocabulary (amis, chinese, part_of_speech, created_at) VALUES (?,?,?,?)", (a_in, c_in, p_in, now))
                     reorder_ids("vocabulary"); backup_to_github(); st.rerun()
-        with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
-        edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic")
+        
+        st.divider()
+        with sqlite3.connect('amis_data.db') as conn: 
+            df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
+        
+        # [關鍵校準] 表格內下拉選單與即時搜尋功能
+        edited_df = st.data_editor(
+            df, 
+            use_container_width=True, 
+            num_rows="dynamic",
+            column_config={
+                "part_of_speech": st.column_config.SelectboxColumn(
+                    "詞類標籤 (雙擊搜尋)",
+                    help="點擊兩次可彈出 100+ 個標籤，直接輸入字元可即時搜尋過濾。",
+                    options=raw_tags,
+                    required=True,
+                    width="large"
+                )
+            }
+        )
+        
         if st.button("💾 儲存修改"):
             with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
             reorder_ids("vocabulary"); backup_to_github(); st.rerun()
