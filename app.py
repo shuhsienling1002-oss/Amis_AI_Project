@@ -70,37 +70,45 @@ def is_linguistically_relevant(keyword, target_word):
         else: return False 
     return False
 
-# [新增] 雲端備份功能
+# [關鍵升級] 智慧雲端備份功能
 def backup_to_github():
-    """將目前的資料庫推送到 GitHub"""
-    token = st.secrets.get("GITHUB_TOKEN")
+    """智慧偵測倉庫並將資料庫推送到 GitHub"""
+    token = st.secrets.get("general", {}).get("GITHUB_TOKEN") or st.secrets.get("GITHUB_TOKEN")
+    
     if not token:
-        st.error("❌ 未設定 GitHub Token，無法備份！請在 Secrets 中設定。")
+        st.error("❌ 未偵測到 GitHub Token。請確保 Secrets 中有 [general] GITHUB_TOKEN 設定。")
         return False
     
     try:
         g = Github(token)
-        # 這裡請改為您的 GitHub 帳號與倉庫名稱
-        repo_name = "shuhsienling1002-oss/Amis_AI_Project" 
-        repo = g.get_repo(repo_name)
+        # 智慧路徑偵測：優先使用您的正確路徑
+        repo_path = "shuhsienling1002-oss/Amis_AI_Project"
         
+        try:
+            repo = g.get_repo(repo_path)
+        except Exception as e:
+            st.error(f"⚠️ 找不到 GitHub 倉庫: {repo_path}。請檢查權限或路徑名稱是否正確。")
+            return False
+            
         file_path = "amis_data.db"
         with open(file_path, "rb") as f:
             content = f.read()
         
-        # 嘗試取得現有檔案以進行更新
         try:
+            # 嘗試更新現有檔案
             contents = repo.get_contents(file_path)
             repo.update_file(contents.path, f"Mobile update: {datetime.now()}", content, contents.sha)
-            st.toast("☁️ 雲端備份成功！資料已同步到 GitHub。", icon="✅")
+            st.toast("☁️ 雲端備份成功！資料已同步回 GitHub。", icon="✅")
             return True
         except:
-            # 如果檔案不存在，則創建新檔案
-            repo.create_file(file_path, f"Init db: {datetime.now()}", content)
-            st.toast("☁️ 雲端備份成功！(新檔案)", icon="✅")
+            # 如果檔案不存在，則新建
+            repo.create_file(file_path, f"Initial DB: {datetime.now()}", content)
+            st.toast("☁️ 雲端備份成功！(已建立新資料庫)", icon="✅")
             return True
+            
     except Exception as e:
-        st.error(f"⚠️ 備份失敗: {e}")
+        # 顯示真正的底層錯誤原因
+        st.error(f"⚠️ 備份發生預期外錯誤: {str(e)}")
         return False
 
 def get_expert_knowledge(query_text, direction="AtoZ"):
@@ -271,7 +279,7 @@ def main():
     
     st.sidebar.title("🦅 系統選單")
     
-    # [新增] 雲端同步按鈕
+    # [同步中心]
     with st.sidebar.container():
         st.info("☁️ **行動同步中心**")
         if st.button("🔄 立即將資料備份回 GitHub", type="primary"):
@@ -352,7 +360,7 @@ def main():
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     run_query("INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) VALUES (?,?,?,?)", (a, c, e, now))
                     sync_vocabulary(a); reorder_ids("sentence_pairs"); 
-                    backup_to_github() # [新增] 自動備份
+                    backup_to_github() 
                     st.rerun()
         st.divider()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
@@ -361,7 +369,7 @@ def main():
             edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
             reorder_ids("sentence_pairs"); 
-            backup_to_github() # [新增] 自動備份
+            backup_to_github() 
             st.rerun()
 
     elif page == "📖 單詞：語料庫管理":
@@ -386,7 +394,7 @@ def main():
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     run_query("INSERT INTO vocabulary (amis, chinese, english, part_of_speech, created_at) VALUES (?,?,?,?,?)", (a_in, c_in, e_in, p_in, now))
                     reorder_ids("vocabulary"); 
-                    backup_to_github() # [新增] 自動備份
+                    backup_to_github() 
                     st.rerun()
         
         st.divider()
@@ -399,7 +407,7 @@ def main():
             edited_df['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
             reorder_ids("vocabulary"); 
-            backup_to_github() # [新增] 自動備份
+            backup_to_github() 
             st.rerun()
 
     elif page == "🏷️ 語法標籤管理":
@@ -417,7 +425,7 @@ def main():
                             conn.execute("INSERT OR IGNORE INTO pos_tags (tag_name) VALUES (?)", (new_tag_name,))
                             conn.execute("DELETE FROM pos_tags WHERE tag_name = ?", (old_tag,))
                         st.success(f"✅ 成功將 '{old_tag}' 更名為 '{new_tag_name}'，並更新了相關單詞！")
-                        backup_to_github() # [新增] 自動備份
+                        backup_to_github() 
                         time.sleep(1.5); st.rerun()
                     except Exception as e: st.error(f"更新失敗: {e}")
                 else: st.warning("請輸入有效的新名稱。")
@@ -428,7 +436,7 @@ def main():
             nt = st.text_input("新增標籤名稱")
             if st.form_submit_button("新增"): 
                 run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,))
-                backup_to_github() # [新增] 自動備份
+                backup_to_github() 
                 st.rerun()
         
         with sqlite3.connect('amis_data.db') as conn: 
@@ -439,20 +447,11 @@ def main():
         et = st.data_editor(df_tags, use_container_width=True, num_rows="dynamic", column_config={"sort_order": None})
         if st.button("💾 儲存列表修改"):
             with sqlite3.connect('amis_data.db') as conn: et.to_sql('pos_tags', conn, if_exists='replace', index=False)
-            backup_to_github() # [新增] 自動備份
+            backup_to_github() 
             st.success("✅ 標籤已存檔！"); st.rerun()
 
     elif page == "🎓 語料匯出":
         st.title("🎓 語料匯出與戰略進度")
-        with st.container():
-            st.info("🗺️ **AI 戰略發展路線圖 (Roadmap)**")
-            c1, c2, c3 = st.columns(3)
-            with c1: st.markdown("### 🚩 第一階段 (目前)"); st.caption("RAG 檢索增強生成"); st.write("✅ **Python 採礦機**\n✅ **Gemini 廚師**\n🛠️ **目標**：持續擴充語料庫。")
-            with c2: st.markdown("### 🏔️ 第二階段 (1,000+)")
-            with c3: st.markdown("### 🏰 第三階段 (10,000+)")
-        
-        st.divider()
-        st.subheader("📥 資料預覽與匯出")
         tab1, tab2 = st.tabs(["📝 句型庫 (Sentences)", "📖 單詞庫 (Vocabulary)"])
         with tab1:
             with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
