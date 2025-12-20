@@ -327,4 +327,81 @@ def main():
         with st.expander("⚡ 智慧更名工具 (連動更新單詞)", expanded=True):
             current_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
             c1, c2 = st.columns(2)
-            old_tag
+            old_tag = c1.selectbox("選擇要修改的舊標籤", options=current_tags)
+            new_tag_name = c2.text_input("輸入新名稱")
+            if st.button("🔄 執行更名與連動更新"):
+                if old_tag and new_tag_name and old_tag != new_tag_name:
+                    try:
+                        with sqlite3.connect('amis_data.db') as conn:
+                            conn.execute("UPDATE vocabulary SET part_of_speech = ? WHERE part_of_speech = ?", (new_tag_name, old_tag))
+                            conn.execute("INSERT OR IGNORE INTO pos_tags (tag_name) VALUES (?)", (new_tag_name,))
+                            conn.execute("DELETE FROM pos_tags WHERE tag_name = ?", (old_tag,))
+                        st.success(f"✅ 成功將 '{old_tag}' 更名為 '{new_tag_name}'，並更新了相關單詞！")
+                        backup_to_github(); time.sleep(1.5); st.rerun()
+                    except Exception as e: st.error(f"更新失敗: {e}")
+        st.divider()
+
+        # [新增標籤]
+        with st.form("t"):
+            nt = st.text_input("新增標籤名稱")
+            if st.form_submit_button("新增"): 
+                run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,)) 
+                backup_to_github(); st.rerun()
+
+        # ==========================================
+        # 🔥 自適應新增「備註」欄位 + 排序控制
+        # ==========================================
+        with sqlite3.connect('amis_data.db') as conn: 
+            df_tags = pd.read_sql("SELECT * FROM pos_tags", conn)
+
+        # 1. 自適應結構：補上 description 欄位
+        if "description" not in df_tags.columns:
+            df_tags["description"] = "" 
+
+        # 2. 欄位排序：確保備註在右側
+        cols_order = ["tag_name", "description", "sort_order"]
+        existing_cols = [c for c in cols_order if c in df_tags.columns]
+        remaining_cols = [c for c in df_tags.columns if c not in existing_cols]
+        df_tags = df_tags[existing_cols + remaining_cols]
+
+        # 3. 編輯器配置
+        et = st.data_editor(
+            df_tags, 
+            use_container_width=True, 
+            num_rows="dynamic",
+            column_config={
+                "tag_name": st.column_config.TextColumn("語法標籤名稱", disabled=True), 
+                "description": st.column_config.TextColumn(
+                    "備註 (LLM 定義校準)", 
+                    help="在此說明此標籤與大語言模型通用定義的差異",
+                    width="large" 
+                ),
+                "sort_order": st.column_config.NumberColumn("排序權重")
+            }
+        )
+
+        if st.button("💾 儲存標籤與備註"):
+            with sqlite3.connect('amis_data.db') as conn: 
+                et.to_sql('pos_tags', conn, if_exists='replace', index=False)
+            backup_to_github(); st.success("已存檔！資料庫結構已自動更新。"); st.rerun()
+
+    elif page == "🎓 語料匯出":
+        st.title("🎓 語料匯出與戰略進度")
+        with st.container():
+            st.info("🗺️ **AI 戰略發展路線圖 (Roadmap)**")
+            c1, c2, c3 = st.columns(3)
+            with c1: st.markdown("### 🚩 第一階段 (目前)"); st.caption("RAG 檢索增強生成"); st.write("✅ **Python 採礦機**\n✅ **Gemini 廚師**\n🛠️ **目標**：持續擴充語料庫。")
+            with c2: st.markdown("### 🏔️ 第二階段 (1,000+)"); st.caption("微調 (Fine-tuning)"); st.write("🛠️ **目標**：初步建立專屬模型。")
+            with c3: st.markdown("### 城堡🏰 第三階段 (10,000+)"); st.caption("原生模型 (Native LLM)"); st.write("🛠️ **目標**：阿美語原生推理能力。")
+        st.divider()
+        tab1, tab2 = st.tabs(["📝 句型", "📖 單詞"])
+        with tab1:
+            with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
+            st.dataframe(df, use_container_width=True)
+            st.download_button("📥 下載 JSONL", df.to_json(orient="records", lines=True, force_ascii=False), "amis_sentences.jsonl")
+        with tab2:
+            with sqlite3.connect('amis_data.db') as conn: df_v = pd.read_sql("SELECT * FROM vocabulary", conn)
+            st.dataframe(df_v, use_container_width=True)
+            st.download_button("📥 下載 JSONL", df_v.to_json(orient="records", lines=True, force_ascii=False), "amis_vocabulary.jsonl")
+
+if __name__ == "__main__": main()
