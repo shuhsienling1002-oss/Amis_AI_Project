@@ -61,31 +61,26 @@ def sync_vocabulary(sentence):
 
 def is_linguistically_relevant(keyword, target_word):
     """
-    [詞法過濾器] (2025-12-20 Update)
-    針對阿美語單字母虛詞 (a, i, o) 進行嚴格過濾。
+    [絕對防禦版] 詞法過濾器 (針對 o, a, i 問題)
+    邏輯：搜尋單字母 'o' 時，嚴格禁止匹配 'ko', 'to' 等字。
     """
-    k = keyword.lower()
-    t = target_word.lower()
+    k = keyword.lower().strip()
+    t = target_word.lower().strip()
 
     # 1. 絕對優先：完全匹配 (Exact Match)
-    # 這是為了讓使用者搜尋 'a' 時，能找到單字 'a'
+    # 這是為了讓使用者搜尋 'o' 時，能找到真正的 'o' (或大寫 'O')
     if k == t: return True
 
-    # 2. [修正] 單字母保護機制 (Single-Letter Guard)
-    # 如果使用者搜尋的是單字母 (如 'a', 'i', 'o')，但上面的 k==t 不成立 (代表目標字較長，如 'tayra')
-    # 則強制回傳 False，過濾掉這些雜訊。
+    # 2. 單字母絕對封殺 (The Kill Switch)
+    # 如果您搜尋的是 'o' (長度為1)，且上面的 k==t 不成立 (代表目標是 'ko' 或 'to')
+    # 這裡直接回傳 False，強制過濾掉。
     if len(k) == 1:
         return False 
 
-    # 3. 前綴與後綴匹配 (針對 2 個字母以上的查詢)
-    # 例如 'ma' 可以匹配 'maolah' (前綴)
+    # 3. 模糊匹配 (只有關鍵字 2 個字母以上才准用)
+    # 例如搜尋 'ma'，可以找到 'maolah'
     if t.startswith(k) or t.endswith(k): return True
-
-    # 4. 中間包含匹配 (僅當關鍵字夠長時才啟用)
-    # 避免短字串 (如 'an') 匹配到太多無關單字
-    if k in t:
-        if len(k) > 2: return True 
-        else: return False 
+    if k in t and len(k) > 2: return True
     
     return False
 
