@@ -61,30 +61,28 @@ def sync_vocabulary(sentence):
 
 def is_linguistically_relevant(keyword, target_word):
     """
-    [絕對防禦版] 詞法過濾器 (針對 o, a, i 問題)
-    邏輯：搜尋單字母 'o' 時，嚴格禁止匹配 'ko', 'to' 等字。
+    [絕對防禦版] 詞法過濾器 (2025-12-20 Final Fix)
+    1. 針對單字母 (o, a, i)，嚴格禁止匹配包含該字母的長字 (如 ko, tayra)。
+    2. 強制完全匹配。
     """
     k = keyword.lower().strip()
     t = target_word.lower().strip()
 
-    # 1. 絕對優先：完全匹配 (Exact Match)
-    # 這是為了讓使用者搜尋 'o' 時，能找到真正的 'o' (或大寫 'O')
+    # 1. 絕對優先：完全匹配
     if k == t: return True
 
-    # 2. 單字母絕對封殺 (The Kill Switch)
-    # 如果您搜尋的是 'o' (長度為1)，且上面的 k==t 不成立 (代表目標是 'ko' 或 'to')
-    # 這裡直接回傳 False，強制過濾掉。
+    # 2. 單字母絕對封殺 (Kill Switch)
+    # 如果搜尋的是 'o'，但目標字不是 'o' (例如 'ko')，直接回傳 False。
     if len(k) == 1:
         return False 
 
-    # 3. 模糊匹配 (只有關鍵字 2 個字母以上才准用)
-    # 例如搜尋 'ma'，可以找到 'maolah'
+    # 3. 模糊匹配 (僅限 2 個字母以上)
     if t.startswith(k) or t.endswith(k): return True
     if k in t and len(k) > 2: return True
     
     return False
 
-# [終極修復] 導航版雲端備份功能 - 確保連線 shuhsienling1002-oss/Amis_AI_Project
+# [終極修復] 導航版雲端備份功能
 def backup_to_github():
     """終極導航版：精準連線倉庫並備份"""
     token = st.secrets.get("general", {}).get("GITHUB_TOKEN") or st.secrets.get("GITHUB_TOKEN")
@@ -113,67 +111,104 @@ def backup_to_github():
         return False
 
 def get_expert_knowledge(query_text, direction="AtoZ"):
-    """雙向 RAG 檢索邏輯"""
+    """
+    雙向 RAG 檢索邏輯 (2025-12-20 Final Logic)
+    修正點：當搜尋單字母 (a, i, o) 時，強制關閉「中文語意聯想」，避免 'o' (是) 撈出所有包含「是」的句子。
+    """
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
+    
+    # 1. 直接全句匹配 (Exact Sentence Match)
     if direction == "AtoZ":
         sql = "SELECT output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(REPLACE(output_sentencepattern_amis, '.', '')) = ? LIMIT 1"
     else:
         sql = "SELECT output_sentencepattern_amis FROM sentence_pairs WHERE LOWER(output_sentencepattern_chinese) = ? LIMIT 1"
     sentence_match = run_query(sql, (clean_q.lower(),), fetch=True)
     full_trans = sentence_match[0][0] if sentence_match else None
+    
     query_words = re.findall(r"\w+", query_text.lower())
     words_data, sentences_data, rag_context_parts = [], [], []
+    
     try:
         with sqlite3.connect('amis_data.db') as conn:
             for word in query_words:
                 matched_definitions = [] 
+                
+                # [關鍵修正]：如果搜尋關鍵字只有 1 個字母 (如 o, a, i)，強制清空 matched_definitions
+                # 這樣就不會去搜尋中文定義 (例如 "是", "的")，徹底阻斷語意雜訊。
+                should_use_semantic = True
+                if len(word) == 1:
+                    should_use_semantic = False
+
+                # 2. 單字搜尋 (Vocabulary Search)
                 if direction == "AtoZ":
-                    # SQL 雖然用 LIKE 撈取候選，但會被下方的 is_linguistically_relevant 嚴格過濾
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
                 else:
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE chinese LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                
                 valid_vocab_count = 0
                 for w in res_vocab:
+                    # 嚴格過濾 'ko', 'tayra' 等雜訊
                     if direction == "AtoZ" and not is_linguistically_relevant(word, w[0]): continue 
                     if valid_vocab_count >= 50: break 
                     words_data.append({"amis": w[0], "chinese": w[1], "pos": w[2]})
                     rag_context_parts.append(f"[阿美語資料庫] 阿美語: {w[0]} | 中文: {w[1]} (詞性: {w[2]})")
-                    if w[1]: matched_definitions.append(w[1])
+                    
+                    # 只有在允許語意搜尋時，才收集定義
+                    if w[1] and should_use_semantic: 
+                        matched_definitions.append(w[1])
                     valid_vocab_count += 1
+                
+                # 3. 句型搜尋 (Sentence Search)
+                # 3.1 直接關鍵字搜尋
                 if direction == "AtoZ":
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(output_sentencepattern_amis) LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
                 else:
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE output_sentencepattern_chinese LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
+                
+                # 3.2 語意定義擴充搜尋 (Semantic Expansion)
                 res_sent_semantic = []
-                if direction == "AtoZ" and matched_definitions:
+                if direction == "AtoZ" and matched_definitions and should_use_semantic:
+                    # 只有當 should_use_semantic 為 True 時，這裡才會執行
+                    # 所以搜尋 'o' 時，這裡會被跳過，不會去搜 "是"
                     for distinct_def in list(set(matched_definitions))[:3]:
                         core_def = distinct_def.split('(')[0].split('（')[0].strip()
                         if len(core_def) > 0:
                             found = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE output_sentencepattern_chinese LIKE ? LIMIT 20", (f"%{core_def}%",), fetch=True)
                             res_sent_semantic.extend(found)
+                
                 all_raw_sents = res_sent_direct + res_sent_semantic
                 valid_sent_count, processed_sents = 0, set()
+                
+                # 4. 最終過濾 (Sentence Filtering)
                 for s in all_raw_sents:
                     amis_s, chinese_s = s[0], s[1]
                     if (amis_s, chinese_s) in processed_sents: continue
                     processed_sents.add((amis_s, chinese_s))
+                    
                     pass_check = False
                     sent_words = re.findall(r"\w+", amis_s.lower())
                     for sw in sent_words:
-                        # 這裡也會呼叫過濾器，確保例句中是真的包含該單字 (例如真的包含 'o' 而不是 'ko')
+                        # 再次執行嚴格過濾：句子裡必須真的有 standalone 的 'o'
                         if is_linguistically_relevant(word, sw): pass_check = True; break
-                    if not pass_check and direction == "AtoZ":
+                    
+                    # [雙重保險] 如果字面上沒找到，但語意符合...
+                    if not pass_check and direction == "AtoZ" and should_use_semantic:
+                        # 因為搜尋 'o' 時 should_use_semantic 為 False
+                        # 所以這裡也會被強制跳過！"Cima kiso?" (你是誰) 就算有 "是"，也會因為 pass_check 為 False 而被擋下。
                         for distinct_def in list(set(matched_definitions))[:3]:
                              core_def = distinct_def.split('(')[0].split('（')[0].strip()
                              if core_def and core_def in chinese_s: pass_check = True; break
+                    
                     if not pass_check: continue
+
                     if {"amis": amis_s, "chinese": chinese_s} not in sentences_data:
                         if valid_sent_count >= 20: break
                         sentences_data.append({"amis": amis_s, "chinese": chinese_s})
                         rag_context_parts.append(f"[阿美語資料庫] 例句(阿美語): {amis_s} | (中文): {chinese_s}")
                         valid_sent_count += 1
     except: pass
+    
     if len(rag_context_parts) > 80:
         rag_context_parts = rag_context_parts[:80]
         rag_context_parts.append("(System: 參考資料過多，已截取前 80 筆)")
