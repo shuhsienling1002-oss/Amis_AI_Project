@@ -113,7 +113,7 @@ def backup_to_github():
 def get_expert_knowledge(query_text, direction="AtoZ"):
     """
     雙向 RAG 檢索邏輯 (2025-12-20 Final Logic)
-    修正點：當搜尋單字母 (a, i, o) 時，強制關閉「中文語意聯想」，避免 'o' (是) 撈出所有包含「是」的句子。
+    修正點：當搜尋單字母 (a, i, o) 時，強制關閉「中文語意聯想」。
     """
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
@@ -170,7 +170,6 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                 res_sent_semantic = []
                 if direction == "AtoZ" and matched_definitions and should_use_semantic:
                     # 只有當 should_use_semantic 為 True 時，這裡才會執行
-                    # 所以搜尋 'o' 時，這裡會被跳過，不會去搜 "是"
                     for distinct_def in list(set(matched_definitions))[:3]:
                         core_def = distinct_def.split('(')[0].split('（')[0].strip()
                         if len(core_def) > 0:
@@ -194,8 +193,6 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                     
                     # [雙重保險] 如果字面上沒找到，但語意符合...
                     if not pass_check and direction == "AtoZ" and should_use_semantic:
-                        # 因為搜尋 'o' 時 should_use_semantic 為 False
-                        # 所以這裡也會被強制跳過！"Cima kiso?" (你是誰) 就算有 "是"，也會因為 pass_check 為 False 而被擋下。
                         for distinct_def in list(set(matched_definitions))[:3]:
                              core_def = distinct_def.split('(')[0].split('（')[0].strip()
                              if core_def and core_def in chinese_s: pass_check = True; break
@@ -283,17 +280,9 @@ def main():
         st.info("☁️ **行動同步中心**")
         if st.sidebar.button("🔄 立即將資料備份回 GitHub", type="primary"):
             backup_to_github()
-    with st.sidebar.expander("🔧 資料庫整形診所"):
-        if st.button("🛠️ 1. 執行：句型庫重構"):
-            try:
-                with sqlite3.connect('amis_data.db') as conn:
-                    conn.execute("ALTER TABLE sentence_pairs RENAME TO sentence_pairs_old_backup")
-                    conn.execute('CREATE TABLE sentence_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TIMESTAMP, output_sentencepattern_amis TEXT, output_sentencepattern_chinese TEXT, output_sentencepattern_english TEXT)')
-                    conn.execute("""INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) SELECT output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at FROM sentence_pairs_old_backup""")
-                    conn.execute("DROP TABLE sentence_pairs_old_backup")
-                    reorder_ids("sentence_pairs")
-                st.sidebar.success("✅ 修復完成！"); time.sleep(1); st.rerun()
-            except Exception as e: st.sidebar.error(f"錯誤: {e}")
+    
+    # [已執行指令] 移除「資料庫整形診所」區塊
+    
     key = st.sidebar.text_input("Google API Key", type="password", value=st.session_state.get("api_key", ""))
     if key != st.session_state.get("api_key"): 
         st.session_state["api_key"] = key; st.cache_resource.clear(); st.rerun()
