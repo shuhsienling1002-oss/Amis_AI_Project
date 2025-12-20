@@ -60,14 +60,32 @@ def sync_vocabulary(sentence):
             run_query("INSERT INTO vocabulary (amis, note, created_at) VALUES (?, ?, ?)", (word, f"來自句型: {sentence}", now))
 
 def is_linguistically_relevant(keyword, target_word):
-    """詞法過濾器"""
+    """
+    詞法過濾器 (2025-12-20 Update):
+    修正單字母搜尋 (如 'a') 產生過多雜訊的問題。
+    """
     k = keyword.lower()
     t = target_word.lower()
+
+    # 1. 絕對優先：完全匹配 (Exact Match)
     if k == t: return True
+
+    # 2. [修正] 單字母保護機制
+    # 如果使用者只搜尋 1 個字母 (如 'a', 'o', 'i')，我們假設他只要找那個虛詞/連接詞
+    # 因此直接回傳 False，排除所有包含該字母但不是該字母的字 (如排除 'tayra', 'na')
+    if len(k) == 1:
+        return False 
+
+    # 3. 前綴與後綴匹配 (針對 2 個字母以上的查詢)
+    # 例如 'ma' 可以匹配 'maolah' (前綴)
     if t.startswith(k) or t.endswith(k): return True
+
+    # 4. 中間包含匹配 (僅當關鍵字夠長時才啟用)
+    # 避免短字串 (如 'an') 匹配到太多無關單字
     if k in t:
-        if len(k) > 3: return True
+        if len(k) > 2: return True 
         else: return False 
+    
     return False
 
 # [終極修復] 導航版雲端備份功能 - 確保連線 shuhsienling1002-oss/Amis_AI_Project
@@ -115,6 +133,7 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
             for word in query_words:
                 matched_definitions = [] 
                 if direction == "AtoZ":
+                    # 注意：這裡 SQL 還是用 LIKE，但下面會用 Python 的 is_linguistically_relevant 嚴格過濾
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
                 else:
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE chinese LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
@@ -293,7 +312,6 @@ def main():
                     reorder_ids("vocabulary"); backup_to_github(); st.rerun()
         st.divider()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
-        # [恢復選單] 帶有搜尋功能的格子選單
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic",
             column_config={"part_of_speech": st.column_config.SelectboxColumn("詞類 (搜尋選單)", options=raw_tags, required=True)})
         if st.button("💾 儲存修改"):
@@ -303,7 +321,7 @@ def main():
     elif page == "🏷️ 語法標籤管理":
         st.title("🏷️ 標籤管理 (Tag Alignment)")
         
-        # [智慧更名工具] (連動邏輯保持不變)
+        # [智慧更名工具]
         with st.expander("⚡ 智慧更名工具 (連動更新單詞)", expanded=True):
             current_tags = [r[0] for r in run_query("SELECT tag_name FROM pos_tags", fetch=True) if r[0]]
             c1, c2 = st.columns(2)
@@ -325,39 +343,36 @@ def main():
         with st.form("t"):
             nt = st.text_input("新增標籤名稱")
             if st.form_submit_button("新增"): 
-                # 簡單插入，若無 description 欄位則自動處理，待下方編輯器開啟時會自動補上結構
                 run_query("INSERT OR REPLACE INTO pos_tags (tag_name) VALUES (?)", (nt,)) 
                 backup_to_github(); st.rerun()
 
         # ==========================================
-        # 🔥 重點修改區：自適應新增「備註」欄位
+        # 🔥 自適應新增「備註」欄位
         # ==========================================
         with sqlite3.connect('amis_data.db') as conn: 
             df_tags = pd.read_sql("SELECT * FROM pos_tags", conn)
 
         # 1. 自適應結構：如果資料庫裡沒有 description 欄位，我們在記憶體中自動加上
         if "description" not in df_tags.columns:
-            df_tags["description"] = "" # 預設為空字串
+            df_tags["description"] = "" 
 
-        # 2. 欄位排序：確保 tag_name 在前，description 在您要的右側
-        # 如果有 sort_order，我們保留它，理想順序: tag_name -> description -> sort_order
+        # 2. 欄位排序
         cols_order = ["tag_name", "description", "sort_order"]
         existing_cols = [c for c in cols_order if c in df_tags.columns]
-        # 把其他沒列在上面的欄位也加回來 (防禦性程式碼)
         remaining_cols = [c for c in df_tags.columns if c not in existing_cols]
         df_tags = df_tags[existing_cols + remaining_cols]
 
-        # 3. 編輯器配置：設定欄位標題與寬度
+        # 3. 編輯器配置
         et = st.data_editor(
             df_tags, 
             use_container_width=True, 
             num_rows="dynamic",
             column_config={
-                "tag_name": st.column_config.TextColumn("語法標籤名稱", disabled=True), # 鎖定主鍵不讓改，避免資料庫錯亂
+                "tag_name": st.column_config.TextColumn("語法標籤名稱", disabled=True), 
                 "description": st.column_config.TextColumn(
                     "備註 (LLM 定義校準)", 
                     help="在此說明此標籤與大語言模型通用定義的差異",
-                    width="large" # 加寬此欄位以便輸入
+                    width="large" 
                 ),
                 "sort_order": st.column_config.NumberColumn("排序權重")
             }
@@ -365,13 +380,11 @@ def main():
 
         if st.button("💾 儲存標籤與備註"):
             with sqlite3.connect('amis_data.db') as conn: 
-                # 使用 replace 模式，這會自動根據新的 DataFrame 結構重建資料表 (包含新加的備註欄位)
                 et.to_sql('pos_tags', conn, if_exists='replace', index=False)
             backup_to_github(); st.success("已存檔！資料庫結構已自動更新。"); st.rerun()
 
     elif page == "🎓 語料匯出":
         st.title("🎓 語料匯出與戰略進度")
-        # [還原] AI 戰略發展路線圖
         with st.container():
             st.info("🗺️ **AI 戰略發展路線圖 (Roadmap)**")
             c1, c2, c3 = st.columns(3)
