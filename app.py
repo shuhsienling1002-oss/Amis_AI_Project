@@ -110,7 +110,7 @@ def backup_to_github():
         st.error(f"⚠️ 連線失敗。請確認 Token 權限。錯誤: {str(e)}")
         return False
 
-@st.cache_data(show_spinner=False)
+# [修改] 移除快取裝飾器 @st.cache_data，確保每次都讀取最新資料庫
 def get_full_database_context():
     """
     [新增功能] 讀取整個資料庫的內容作為 AI 上下文
