@@ -287,8 +287,22 @@ def assistant_system(api_key, model_selection):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(proxy_model)
                             
-                            # 組合 Prompt，加入缺詞標記協議
-                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n請務必遵守【缺詞標記協議】，若遇到資料庫沒有的詞，直接保留中文。\n\n使用者輸入: {user_input}"
+                            # [新增] 視覺化格式指令 (Visual Formatting Instruction)
+                            formatting_instruction = """
+                            【排版特別指令 (Visual Formatting)】
+                            為了讓使用者能一眼識別翻譯結果，請務必遵守以下排版格式：
+                            1. 使用 `### 🦅 阿美語翻譯` 作為標題。
+                            2. 緊接著的翻譯句子，請使用 Streamlit 的顏色語法 `:orange[...]` (橘色) 將整句包起來，使其顯眼且舒適。
+                            3. 範例輸出：
+                               ### 🦅 阿美語翻譯
+                               :orange[I 花蓮 kako.]
+                               
+                               ### 📊 語法分析
+                               (此處接續分析...)
+                            """
+                            
+                            # 組合 Prompt
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n請務必遵守【缺詞標記協議】，若遇到資料庫沒有的詞，直接保留中文。\n\n使用者輸入: {user_input}"
                             
                             response = m.generate_content(full_prompt)
                             if response:
@@ -333,7 +347,7 @@ def assistant_system(api_key, model_selection):
                         with st.spinner(f"正在呼叫 {actual_model} ..."):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(actual_model)
-                            # 組合 Prompt，加入缺詞標記協議
+                            # 組合 Prompt
                             final_prompt = f"{r}\n\n{missing_word_protocol}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析。\n若遇到資料庫沒有的詞，請依據【缺詞標記協議】保留中文。\n\n使用者輸入: {st.session_state.last_query}"
                             response = m.generate_content(final_prompt)
                             if response:
