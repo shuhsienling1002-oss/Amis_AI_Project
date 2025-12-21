@@ -136,13 +136,11 @@ def get_full_database_context():
 
 def get_expert_knowledge(query_text, direction="AtoZ"):
     """
-    雙向 RAG 檢索邏輯 (2025-12-20 Final Logic)
-    修正點：當搜尋單字母 (a, i, o) 時，強制關閉「中文語意聯想」。
+    雙向 RAG 檢索邏輯 (保留原版嚴格過濾邏輯)
     """
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
     
-    # 1. 直接全句匹配 (Exact Sentence Match)
     if direction == "AtoZ":
         sql = "SELECT output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(REPLACE(output_sentencepattern_amis, '.', '')) = ? LIMIT 1"
     else:
@@ -157,14 +155,9 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
         with sqlite3.connect('amis_data.db') as conn:
             for word in query_words:
                 matched_definitions = [] 
-                
-                # [關鍵修正]：如果搜尋關鍵字只有 1 個字母 (如 o, a, i)，強制清空 matched_definitions
-                # 這樣就不會去搜尋中文定義 (例如 "是", "的")，徹底阻斷語意雜訊。
                 should_use_semantic = True
-                if len(word) == 1:
-                    should_use_semantic = False
+                if len(word) == 1: should_use_semantic = False
 
-                # 2. 單字搜尋 (Vocabulary Search)
                 if direction == "AtoZ":
                     res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
                 else:
@@ -172,28 +165,20 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                 
                 valid_vocab_count = 0
                 for w in res_vocab:
-                    # 嚴格過濾 'ko', 'tayra' 等雜訊
                     if direction == "AtoZ" and not is_linguistically_relevant(word, w[0]): continue 
                     if valid_vocab_count >= 50: break 
                     words_data.append({"amis": w[0], "chinese": w[1], "pos": w[2]})
                     rag_context_parts.append(f"[阿美語資料庫] 阿美語: {w[0]} | 中文: {w[1]} (詞性: {w[2]})")
-                    
-                    # 只有在允許語意搜尋時，才收集定義
-                    if w[1] and should_use_semantic: 
-                        matched_definitions.append(w[1])
+                    if w[1] and should_use_semantic: matched_definitions.append(w[1])
                     valid_vocab_count += 1
                 
-                # 3. 句型搜尋 (Sentence Search)
-                # 3.1 直接關鍵字搜尋
                 if direction == "AtoZ":
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(output_sentencepattern_amis) LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
                 else:
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE output_sentencepattern_chinese LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
                 
-                # 3.2 語意定義擴充搜尋 (Semantic Expansion)
                 res_sent_semantic = []
                 if direction == "AtoZ" and matched_definitions and should_use_semantic:
-                    # 只有當 should_use_semantic 為 True 時，這裡才會執行
                     for distinct_def in list(set(matched_definitions))[:3]:
                         core_def = distinct_def.split('(')[0].split('（')[0].strip()
                         if len(core_def) > 0:
@@ -203,26 +188,19 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                 all_raw_sents = res_sent_direct + res_sent_semantic
                 valid_sent_count, processed_sents = 0, set()
                 
-                # 4. 最終過濾 (Sentence Filtering)
                 for s in all_raw_sents:
                     amis_s, chinese_s = s[0], s[1]
                     if (amis_s, chinese_s) in processed_sents: continue
                     processed_sents.add((amis_s, chinese_s))
-                    
                     pass_check = False
                     sent_words = re.findall(r"\w+", amis_s.lower())
                     for sw in sent_words:
-                        # 再次執行嚴格過濾：句子裡必須真的有 standalone 的 'o'
                         if is_linguistically_relevant(word, sw): pass_check = True; break
-                    
-                    # [雙重保險] 如果字面上沒找到，但語意符合...
                     if not pass_check and direction == "AtoZ" and should_use_semantic:
                         for distinct_def in list(set(matched_definitions))[:3]:
                              core_def = distinct_def.split('(')[0].split('（')[0].strip()
                              if core_def and core_def in chinese_s: pass_check = True; break
-                    
                     if not pass_check: continue
-
                     if {"amis": amis_s, "chinese": chinese_s} not in sentences_data:
                         if valid_sent_count >= 20: break
                         sentences_data.append({"amis": amis_s, "chinese": chinese_s})
@@ -243,76 +221,113 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
 def assistant_system(api_key, model_selection):
     st.title("◎ AI 智慧翻譯機")
     
-    # [更新] 模型名稱定義，加入全庫分析版
-    DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (全庫深度分析)"
-    
+    DREAM_MODEL_NAME = "🧬 Pangcah/'Amis_language_mode"
     available_models = get_verified_models(api_key)
-    
-    # [邏輯更新] 判斷是否為 Pangcah 模式
     is_pangcah_mode = (model_selection == DREAM_MODEL_NAME)
     
+    # [模式分流]
     if is_pangcah_mode:
+        # ==========================================
+        # 模式 A: Pangcah 全庫分析模式 (兩階段)
+        # ==========================================
         proxy_model = "models/gemini-1.5-flash-latest" 
         real_models = [m for m in available_models if "Pangcah" not in m]
         if real_models: proxy_model = real_models[0] 
-        st.info(f"🦅 **Pangcah 模式已啟動**：AI 將讀取「完整資料庫」進行深度分析與翻譯，而非僅依賴關鍵字檢索。底層運算由 **{proxy_model}** 執行。")
-        actual_model = proxy_model
-    else:
-        actual_model = model_selection
         
-    mode = st.radio("翻譯方向", ["阿美語 ⮕ 中文", "中文 ⮕ 阿美語"], horizontal=True)
-    direction = "AtoZ" if mode == "阿美語 ⮕ 中文" else "ZtoA"
-    if "rag_result" not in st.session_state: st.session_state.rag_result = None
-    if "last_query" not in st.session_state: st.session_state.last_query = ""
-    st.subheader("輸入文字")
-    with st.form("translation_search"):
-        q = st.text_area(f"在此輸入句子", height=150)
-        submit_search = st.form_submit_button("🚀 1. 查詢語料庫", type="primary")
-    if submit_search and q:
-        f, w, s, r = get_expert_knowledge(q, direction)
-        st.session_state.rag_result = (f, w, s, r)
-        st.session_state.last_query = q
-    st.divider()
-    if st.session_state.rag_result:
-        f, w, s, r = st.session_state.rag_result
-        if f: st.success(f"### 🏆 專家翻譯：\n**{f}**")
-        if w:
-            with st.expander(f"📚 相關單詞 ({len(w)} 筆)", expanded=True):
-                for item in w: st.markdown(f"- **{item['amis']}** ⮕ {item['chinese']} ({item['pos']})")
-        if s:
-            with st.expander(f"🗣️ 相關例句 ({len(s)} 筆)", expanded=True):
-                for item in s: st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
-        st.divider()
+        st.info(f"🦅 **Pangcah 模式 (全庫思維)**：此模式會先「閱讀」整本字典與句型庫，再回答您的問題。")
         
-        st.markdown("### 🤖 AI 協同分析")
+        # 初始化狀態
+        if "pangcah_ready" not in st.session_state: st.session_state.pangcah_ready = False
+        if "pangcah_context" not in st.session_state: st.session_state.pangcah_context = ""
+
+        # 階段 1: 按鈕觸發資料分析
+        if not st.session_state.pangcah_ready:
+            st.markdown("#### 1. 準備階段")
+            st.write("請先讓模型進行資料庫深度掃描。")
+            if st.button("🚀 執行 Pangcah 資料分析 (讀取全庫)", type="primary"):
+                with st.spinner("正在閱讀資料庫...這可能需要幾秒鐘..."):
+                    ctx = get_full_database_context()
+                    st.session_state.pangcah_context = ctx
+                    st.session_state.pangcah_ready = True
+                st.rerun()
         
-        # [修改] 根據是否為 Pangcah 模式顯示不同的按鈕文字
-        btn_label = "🦅 執行 Pangcah 全庫分析" if is_pangcah_mode else "🦅 執行 AI 語法分析"
-        
-        if st.button(btn_label):
-            if not api_key: st.warning("請設定 API Key")
-            else:
-                try:
-                    with st.spinner(f"正在呼叫 {actual_model} ..."):
-                        genai.configure(api_key=api_key)
-                        m = genai.GenerativeModel(actual_model)
-                        
-                        # [關鍵邏輯] 分流：RAG 模式 vs 全庫模式
-                        if is_pangcah_mode:
-                            with st.status("📚 正在讀取完整資料庫...", expanded=False) as status:
-                                full_context = get_full_database_context()
-                                status.update(label="✅ 資料庫讀取完成！正在進行深度推論...", state="complete")
+        # 階段 2: 分析完成，顯示輸入框
+        else:
+            st.success("✅ 資料庫分析完成！Pangcah 模型已就緒。")
+            
+            # 重置按鈕 (如果想重新讀取)
+            if st.button("🔄 重新分析資料庫"):
+                st.session_state.pangcah_ready = False
+                st.rerun()
+            
+            st.divider()
+            st.markdown("#### 2. 測試與互動")
+            
+            # 專屬輸入框
+            user_input = st.text_area("在此輸入您要翻譯或分析的阿美語/中文內容：", height=150)
+            
+            if st.button("🦅 送出測試 (執行翻譯或語法分析)", type="primary"):
+                if not user_input:
+                    st.warning("請輸入內容")
+                elif not api_key:
+                    st.warning("請設定 Google API Key")
+                else:
+                    try:
+                        with st.spinner(f"Pangcah AI 正在思考 (Base: {proxy_model})..."):
+                            genai.configure(api_key=api_key)
+                            m = genai.GenerativeModel(proxy_model)
                             
-                            final_prompt = f"{full_context}\n\n【指令】\n請根據上方提供的【完整阿美語資料庫】，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n\n使用者輸入: {st.session_state.last_query}"
-                        else:
-                            # 傳統模式：僅使用 RAG 檢索結果 (r)
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n若資料庫中有相似例句，請務必引用。\n\n使用者輸入: {user_input}"
+                            
+                            response = m.generate_content(full_prompt)
+                            if response:
+                                st.markdown("### 🦅 Pangcah 模型分析結果：")
+                                st.write(response.text)
+                    except Exception as e: st.error(f"AI 錯誤：{e}")
+
+    else:
+        # ==========================================
+        # 模式 B: 標準 RAG 模式 (原版功能完全保留)
+        # ==========================================
+        actual_model = model_selection
+        mode = st.radio("翻譯方向", ["阿美語 ⮕ 中文", "中文 ⮕ 阿美語"], horizontal=True)
+        direction = "AtoZ" if mode == "阿美語 ⮕ 中文" else "ZtoA"
+        if "rag_result" not in st.session_state: st.session_state.rag_result = None
+        if "last_query" not in st.session_state: st.session_state.last_query = ""
+        
+        st.subheader("輸入文字")
+        with st.form("translation_search"):
+            q = st.text_area(f"在此輸入句子", height=150)
+            submit_search = st.form_submit_button("🚀 1. 查詢語料庫", type="primary")
+        if submit_search and q:
+            f, w, s, r = get_expert_knowledge(q, direction)
+            st.session_state.rag_result = (f, w, s, r)
+            st.session_state.last_query = q
+        st.divider()
+        if st.session_state.rag_result:
+            f, w, s, r = st.session_state.rag_result
+            if f: st.success(f"### 🏆 專家翻譯：\n**{f}**")
+            if w:
+                with st.expander(f"📚 相關單詞 ({len(w)} 筆)", expanded=True):
+                    for item in w: st.markdown(f"- **{item['amis']}** ⮕ {item['chinese']} ({item['pos']})")
+            if s:
+                with st.expander(f"🗣️ 相關例句 ({len(s)} 筆)", expanded=True):
+                    for item in s: st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
+            st.divider()
+            st.markdown("### 🤖 AI 協同分析")
+            if st.button("🦅 執行 AI 語法分析"):
+                if not api_key: st.warning("請設定 API Key")
+                else:
+                    try:
+                        with st.spinner(f"正在呼叫 {actual_model} ..."):
+                            genai.configure(api_key=api_key)
+                            m = genai.GenerativeModel(actual_model)
                             final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
-                        
-                        response = m.generate_content(final_prompt)
-                        if response:
-                            st.markdown("#### 🦅 AI 分析報告：")
-                            st.write(response.text)
-                except Exception as e: st.error(f"⚠️ AI 錯誤：{e}")
+                            response = m.generate_content(final_prompt)
+                            if response:
+                                st.markdown("#### 🦅 AI 分析報告：")
+                                st.write(response.text)
+                    except Exception as e: st.error(f"⚠️ AI 錯誤：{e}")
 
 # ==========================================
 # 3. 主控台
@@ -339,7 +354,7 @@ def main():
     if raw_ms:
         ms = raw_ms.copy()
         # [更新] 模型選單加入新的 Pangcah 全庫分析版
-        DREAM_MODEL = "🧬 Pangcah/'Amis-language-model (全庫深度分析)"
+        DREAM_MODEL = "🧬 Pangcah/'Amis_language_mode"
         ms.insert(0, DREAM_MODEL)
     model = st.sidebar.selectbox("請選擇 AI 模型", ms, index=0) if ms else None
     st.sidebar.divider()
