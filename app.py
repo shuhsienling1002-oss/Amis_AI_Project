@@ -287,15 +287,15 @@ def assistant_system(api_key, model_selection):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(proxy_model)
                             
-                            # [新增] 視覺化格式指令 (Visual Formatting Instruction)
+                            # [更新] 視覺化格式指令 (Visual Formatting Instruction) - 現代藍色+大字體
                             formatting_instruction = """
                             【排版特別指令 (Visual Formatting)】
-                            為了讓使用者能一眼識別翻譯結果，請務必遵守以下排版格式：
-                            1. 使用 `### 🦅 阿美語翻譯` 作為標題。
-                            2. 緊接著的翻譯句子，請使用 Streamlit 的顏色語法 `:orange[...]` (橘色) 將整句包起來，使其顯眼且舒適。
+                            為了讓使用者能一眼識別最重要的翻譯結果，請務必遵守以下排版格式：
+                            1. 使用 `### 🦅 阿美語翻譯` 作為小標題。
+                            2. **關鍵翻譯句子**：請使用最大的標題級別 `#` 加上 Streamlit 的現代藍色語法 `:blue[...]` 將整句包起來。
                             3. 範例輸出：
                                ### 🦅 阿美語翻譯
-                               :orange[I 花蓮 kako.]
+                               # :blue[I 花蓮 kako.]
                                
                                ### 📊 語法分析
                                (此處接續分析...)
