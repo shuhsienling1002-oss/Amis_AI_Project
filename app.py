@@ -110,6 +110,30 @@ def backup_to_github():
         st.error(f"⚠️ 連線失敗。請確認 Token 權限。錯誤: {str(e)}")
         return False
 
+@st.cache_data(show_spinner=False)
+def get_full_database_context():
+    """
+    [新增功能] 讀取整個資料庫的內容作為 AI 上下文
+    這將提取所有單詞與句型，用於 'Pangcah' 模型的深度分析。
+    """
+    ctx = "【全量阿美語資料庫內容 (Full Corpus Data)】:\n\n"
+    
+    # 1. 提取所有詞彙
+    vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary", fetch=True)
+    if vocab:
+        ctx += "=== 核心詞彙表 (Vocabulary) ===\n"
+        for v in vocab:
+            ctx += f"單詞: {v[0]} | 中文: {v[1]} | 詞性: {v[2]}\n"
+    
+    # 2. 提取所有句型
+    sents = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs", fetch=True)
+    if sents:
+        ctx += "\n=== 專家句型庫 (Sentences) ===\n"
+        for s in sents:
+            ctx += f"例句: {s[0]} | 翻譯: {s[1]}\n"
+            
+    return ctx
+
 def get_expert_knowledge(query_text, direction="AtoZ"):
     """
     雙向 RAG 檢索邏輯 (2025-12-20 Final Logic)
@@ -218,16 +242,24 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
 
 def assistant_system(api_key, model_selection):
     st.title("◎ AI 智慧翻譯機")
-    DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (目標構建中)"
+    
+    # [更新] 模型名稱定義，加入全庫分析版
+    DREAM_MODEL_NAME = "🧬 Pangcah/'Amis-language-model (全庫深度分析)"
+    
     available_models = get_verified_models(api_key)
-    if model_selection == DREAM_MODEL_NAME:
+    
+    # [邏輯更新] 判斷是否為 Pangcah 模式
+    is_pangcah_mode = (model_selection == DREAM_MODEL_NAME)
+    
+    if is_pangcah_mode:
         proxy_model = "models/gemini-1.5-flash-latest" 
         real_models = [m for m in available_models if "Pangcah" not in m]
         if real_models: proxy_model = real_models[0] 
-        st.info(f"🦅 **目標鎖定**：您選擇了未來的 Pangcah 模型！目前系統將由 **{proxy_model}** 代理執行。")
+        st.info(f"🦅 **Pangcah 模式已啟動**：AI 將讀取「完整資料庫」進行深度分析與翻譯，而非僅依賴關鍵字檢索。底層運算由 **{proxy_model}** 執行。")
         actual_model = proxy_model
     else:
         actual_model = model_selection
+        
     mode = st.radio("翻譯方向", ["阿美語 ⮕ 中文", "中文 ⮕ 阿美語"], horizontal=True)
     direction = "AtoZ" if mode == "阿美語 ⮕ 中文" else "ZtoA"
     if "rag_result" not in st.session_state: st.session_state.rag_result = None
@@ -251,15 +283,31 @@ def assistant_system(api_key, model_selection):
             with st.expander(f"🗣️ 相關例句 ({len(s)} 筆)", expanded=True):
                 for item in s: st.markdown(f"> **{item['amis']}**\n> ({item['chinese']})")
         st.divider()
+        
         st.markdown("### 🤖 AI 協同分析")
-        if st.button("🦅 執行 AI 語法分析"):
+        
+        # [修改] 根據是否為 Pangcah 模式顯示不同的按鈕文字
+        btn_label = "🦅 執行 Pangcah 全庫分析" if is_pangcah_mode else "🦅 執行 AI 語法分析"
+        
+        if st.button(btn_label):
             if not api_key: st.warning("請設定 API Key")
             else:
                 try:
                     with st.spinner(f"正在呼叫 {actual_model} ..."):
                         genai.configure(api_key=api_key)
                         m = genai.GenerativeModel(actual_model)
-                        final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
+                        
+                        # [關鍵邏輯] 分流：RAG 模式 vs 全庫模式
+                        if is_pangcah_mode:
+                            with st.status("📚 正在讀取完整資料庫...", expanded=False) as status:
+                                full_context = get_full_database_context()
+                                status.update(label="✅ 資料庫讀取完成！正在進行深度推論...", state="complete")
+                            
+                            final_prompt = f"{full_context}\n\n【指令】\n請根據上方提供的【完整阿美語資料庫】，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n\n使用者輸入: {st.session_state.last_query}"
+                        else:
+                            # 傳統模式：僅使用 RAG 檢索結果 (r)
+                            final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
+                        
                         response = m.generate_content(final_prompt)
                         if response:
                             st.markdown("#### 🦅 AI 分析報告：")
@@ -290,7 +338,8 @@ def main():
     ms = []
     if raw_ms:
         ms = raw_ms.copy()
-        DREAM_MODEL = "🧬 Pangcah/'Amis-language-model (目標構建中)"
+        # [更新] 模型選單加入新的 Pangcah 全庫分析版
+        DREAM_MODEL = "🧬 Pangcah/'Amis-language-model (全庫深度分析)"
         ms.insert(0, DREAM_MODEL)
     model = st.sidebar.selectbox("請選擇 AI 模型", ms, index=0) if ms else None
     st.sidebar.divider()
