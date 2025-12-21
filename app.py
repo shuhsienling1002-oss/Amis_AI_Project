@@ -225,6 +225,16 @@ def assistant_system(api_key, model_selection):
     available_models = get_verified_models(api_key)
     is_pangcah_mode = (model_selection == DREAM_MODEL_NAME)
     
+    # [Prompt Rule] 定義通用「缺詞標記協議」
+    missing_word_protocol = """
+    【特殊翻譯模式：缺詞標記 (Missing Word Protocol)】
+    當你進行翻譯時，請嚴格遵守以下規則：
+    1. 僅限使用上方提供的【阿美語資料庫】或【語料庫檢索結果】中的單字。
+    2. **關鍵規則**：如果原本的中文詞彙（特別是地名、人名、名詞）在資料庫中**完全找不到對應的阿美語**，請**直接保留原本的中文詞彙**，不要自行翻譯，也不要使用拼音。
+    3. 目的：這是為了讓使用者知道資料庫缺少哪些詞彙，以便進行建檔。
+    4. 輸出範例：如果資料庫沒有 '花蓮' (Posong)，翻譯 '我在花蓮' 時，請輸出 'I 花蓮 kako'。
+    """
+    
     # [模式分流]
     if is_pangcah_mode:
         # ==========================================
@@ -277,7 +287,8 @@ def assistant_system(api_key, model_selection):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(proxy_model)
                             
-                            full_prompt = f"{st.session_state.pangcah_context}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n若資料庫中有相似例句，請務必引用。\n\n使用者輸入: {user_input}"
+                            # 組合 Prompt，加入缺詞標記協議
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n請務必遵守【缺詞標記協議】，若遇到資料庫沒有的詞，直接保留中文。\n\n使用者輸入: {user_input}"
                             
                             response = m.generate_content(full_prompt)
                             if response:
@@ -322,7 +333,8 @@ def assistant_system(api_key, model_selection):
                         with st.spinner(f"正在呼叫 {actual_model} ..."):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(actual_model)
-                            final_prompt = f"{r}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析: {st.session_state.last_query}"
+                            # 組合 Prompt，加入缺詞標記協議
+                            final_prompt = f"{r}\n\n{missing_word_protocol}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析。\n若遇到資料庫沒有的詞，請依據【缺詞標記協議】保留中文。\n\n使用者輸入: {st.session_state.last_query}"
                             response = m.generate_content(final_prompt)
                             if response:
                                 st.markdown("#### 🦅 AI 分析報告：")
