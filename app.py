@@ -27,8 +27,9 @@ def get_verified_models(api_key):
         genai.configure(api_key=api_key)
         ms = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         ms.sort(key=lambda x: 0 if 'flash' in x else 1)
-        return ms if ms else ["models/gemini-1.5-flash-latest"]
-    except: return ["models/gemini-1.5-flash-latest"]
+        # 如果找不到任何模型，回傳一個預設的安全值
+        return ms if ms else ["models/gemini-flash-latest"]
+    except: return ["models/gemini-flash-latest"]
 
 def run_query(sql, params=(), fetch=False):
     """資料庫執行引擎"""
@@ -242,8 +243,8 @@ def assistant_system(api_key, model_selection):
         # 模式 A: Pangcah 全庫分析模式 (兩階段)
         # ==========================================
         
-        # [重要修正] 強制鎖定使用 gemini-1.5-flash-latest，解決 404 與 429 問題
-        proxy_model = "models/gemini-1.5-flash-latest" 
+        # [重要修正] 強制鎖定為 models/gemini-flash-latest (對應截圖中的正確名稱)
+        proxy_model = "models/gemini-flash-latest" 
         
         st.info(f"🦅 **Pangcah 模式 (全庫思維)**：此模式會先「閱讀」整本字典與句型庫，再回答您的問題。 (運算核心：{proxy_model})")
         
