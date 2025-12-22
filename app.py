@@ -22,14 +22,21 @@ st.set_page_config(page_title="'Amis/Pangcah AI", layout="wide", page_icon="🦅
 
 @st.cache_resource(show_spinner=False)
 def get_verified_models(api_key):
+    """
+    自動偵測使用者帳號可用的模型列表，並優先排序 Flash 版本
+    """
     if not api_key: return []
     try:
         genai.configure(api_key=api_key)
+        # 取得所有支援 generateContent 的模型
         ms = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        ms.sort(key=lambda x: 0 if 'flash' in x else 1)
-        # 如果找不到任何模型，回傳一個預設的安全值
-        return ms if ms else ["models/gemini-flash-latest"]
-    except: return ["models/gemini-flash-latest"]
+        
+        # 排序邏輯：優先找 'flash'，其次是 'pro'
+        # 這樣可以確保自動選到 gemini-1.5-flash 或 gemini-flash-latest 等存在於列表中的模型
+        ms.sort(key=lambda x: 0 if 'flash' in x else (1 if 'pro' in x else 2))
+        
+        return ms if ms else ["models/gemini-1.5-flash"]
+    except: return ["models/gemini-1.5-flash"]
 
 def run_query(sql, params=(), fetch=False):
     """資料庫執行引擎"""
@@ -64,24 +71,13 @@ def sync_vocabulary(sentence):
 def is_linguistically_relevant(keyword, target_word):
     """
     [絕對防禦版] 詞法過濾器 (2025-12-20 Final Fix)
-    1. 針對單字母 (o, a, i)，嚴格禁止匹配包含該字母的長字 (如 ko, tayra)。
-    2. 強制完全匹配。
     """
     k = keyword.lower().strip()
     t = target_word.lower().strip()
-
-    # 1. 絕對優先：完全匹配
     if k == t: return True
-
-    # 2. 單字母絕對封殺 (Kill Switch)
-    # 如果搜尋的是 'o'，但目標字不是 'o' (例如 'ko')，直接回傳 False。
-    if len(k) == 1:
-        return False 
-
-    # 3. 模糊匹配 (僅限 2 個字母以上)
+    if len(k) == 1: return False 
     if t.startswith(k) or t.endswith(k): return True
     if k in t and len(k) > 2: return True
-    
     return False
 
 # [終極修復] 導航版雲端備份功能
@@ -112,33 +108,40 @@ def backup_to_github():
         st.error(f"⚠️ 連線失敗。請確認 Token 權限。錯誤: {str(e)}")
         return False
 
-# [修改] 移除快取裝飾器，確保即時讀取最新單詞
+# [資料瘦身術] 改用精簡格式，大幅減少 Token 消耗
 def get_full_database_context():
     """
-    [新增功能] 讀取整個資料庫的內容作為 AI 上下文
-    這將提取所有單詞與句型，用於 'Pangcah' 模型的深度分析。
+    讀取整個資料庫，但使用 '資料瘦身術' (CSV style) 來節省 Token。
+    讓 AI 即使讀取大量資料也不容易爆額度。
     """
-    ctx = "【全量阿美語資料庫內容 (Full Corpus Data)】:\n\n"
+    ctx = "【全量阿美語資料庫 (Compact Mode)】\n"
     
-    # 1. 提取所有詞彙
+    # 1. 提取所有詞彙 (精簡版)
+    # 格式：阿美語,中文,詞性 (去除冗言贅字)
     vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary", fetch=True)
     if vocab:
-        ctx += "=== 核心詞彙表 (Vocabulary) ===\n"
+        ctx += "==VOCABULARY==\n"
         for v in vocab:
-            ctx += f"單詞: {v[0]} | 中文: {v[1]} | 詞性: {v[2]}\n"
+            # 如果欄位是 None，轉為空字串
+            a = v[0] if v[0] else ""
+            c = v[1] if v[1] else ""
+            p = v[2] if v[2] else ""
+            ctx += f"{a},{c},{p}\n"
     
-    # 2. 提取所有句型
+    # 2. 提取所有句型 (精簡版)
     sents = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs", fetch=True)
     if sents:
-        ctx += "\n=== 專家句型庫 (Sentences) ===\n"
+        ctx += "\n==SENTENCES==\n"
         for s in sents:
-            ctx += f"例句: {s[0]} | 翻譯: {s[1]}\n"
+            sa = s[0] if s[0] else ""
+            sc = s[1] if s[1] else ""
+            ctx += f"{sa} || {sc}\n"
             
     return ctx
 
 def get_expert_knowledge(query_text, direction="AtoZ"):
     """
-    雙向 RAG 檢索邏輯 (保留原版嚴格過濾邏輯)
+    雙向 RAG 檢索邏輯
     """
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
@@ -224,50 +227,49 @@ def assistant_system(api_key, model_selection):
     st.title("◎ AI 智慧翻譯機")
     
     DREAM_MODEL_NAME = "🧬 Pangcah/'Amis_language_mode"
+    # [更新] 在這裡動態獲取模型列表
     available_models = get_verified_models(api_key)
     is_pangcah_mode = (model_selection == DREAM_MODEL_NAME)
     
-    # [Prompt Rule] 定義通用「缺詞標記協議」
     missing_word_protocol = """
     【特殊翻譯模式：缺詞標記 (Missing Word Protocol)】
-    當你進行翻譯時，請嚴格遵守以下規則：
-    1. 僅限使用上方提供的【阿美語資料庫】或【語料庫檢索結果】中的單字。
-    2. **關鍵規則**：如果原本的中文詞彙（特別是地名、人名、名詞）在資料庫中**完全找不到對應的阿美語**，請**直接保留原本的中文詞彙**，不要自行翻譯，也不要使用拼音。
-    3. 目的：這是為了讓使用者知道資料庫缺少哪些詞彙，以便進行建檔。
-    4. 輸出範例：如果資料庫沒有 '花蓮' (Posong)，翻譯 '我在花蓮' 時，請輸出 'I 花蓮 kako'。
+    1. 僅限使用提供的資料庫內容。
+    2. **關鍵規則**：若中文詞彙（如地名、名詞）在資料庫中找不到對應阿美語，請**直接保留中文**，不要自行翻譯或用拼音。
+    3. 輸出範例：若無 '花蓮'，翻譯 '我在花蓮' -> 'I 花蓮 kako'。
     """
     
     # [模式分流]
     if is_pangcah_mode:
         # ==========================================
-        # 模式 A: Pangcah 全庫分析模式 (兩階段)
+        # 模式 A: Pangcah 全庫分析模式
         # ==========================================
         
-        # [重要修正] 強制鎖定為 models/gemini-flash-latest (對應截圖中的正確名稱)
-        proxy_model = "models/gemini-flash-latest" 
+        # [關鍵修正] 自動挑選最佳的 Flash 模型 (Auto-Select)
+        # 邏輯：從 available_models 裡找出名字含 'flash' 的，選第一個。
+        # 這樣不管 Google 叫它 'gemini-1.5-flash' 還是 'gemini-flash-latest'，我們都抓得到。
+        flash_models = [m for m in available_models if 'flash' in m]
+        if flash_models:
+            proxy_model = flash_models[0] # 自動選第一個 Flash 模型
+        else:
+            proxy_model = available_models[0] if available_models else "models/gemini-1.5-flash" # 備案
         
-        st.info(f"🦅 **Pangcah 模式 (全庫思維)**：此模式會先「閱讀」整本字典與句型庫，再回答您的問題。 (運算核心：{proxy_model})")
+        st.info(f"🦅 **Pangcah 模式 (全庫思維)**：正在使用 **{proxy_model}** 進行深度分析。(已啟用資料瘦身技術以節省流量)")
         
-        # 初始化狀態
         if "pangcah_ready" not in st.session_state: st.session_state.pangcah_ready = False
         if "pangcah_context" not in st.session_state: st.session_state.pangcah_context = ""
 
-        # 階段 1: 按鈕觸發資料分析
         if not st.session_state.pangcah_ready:
             st.markdown("#### 1. 準備階段")
             st.write("請先讓模型進行資料庫深度掃描。")
             if st.button("🚀 執行 Pangcah 資料分析 (讀取全庫)", type="primary"):
-                with st.spinner("正在閱讀資料庫...這可能需要幾秒鐘..."):
+                with st.spinner("正在閱讀並壓縮資料庫..."):
                     ctx = get_full_database_context()
                     st.session_state.pangcah_context = ctx
                     st.session_state.pangcah_ready = True
                 st.rerun()
         
-        # 階段 2: 分析完成，顯示輸入框
         else:
             st.success("✅ 資料庫分析完成！Pangcah 模型已就緒。")
-            
-            # 重置按鈕 (如果想重新讀取)
             if st.button("🔄 重新分析資料庫"):
                 st.session_state.pangcah_ready = False
                 st.rerun()
@@ -275,7 +277,6 @@ def assistant_system(api_key, model_selection):
             st.divider()
             st.markdown("#### 2. 測試與互動")
             
-            # 專屬輸入框
             user_input = st.text_area("在此輸入您要翻譯或分析的阿美語/中文內容：", height=150)
             
             if st.button("🦅 送出測試 (執行翻譯或語法分析)", type="primary"):
@@ -285,33 +286,30 @@ def assistant_system(api_key, model_selection):
                     st.warning("請設定 Google API Key")
                 else:
                     try:
-                        with st.spinner(f"Pangcah AI 正在思考 (Base: {proxy_model})..."):
+                        with st.spinner(f"Pangcah AI 正在思考 (Core: {proxy_model})..."):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(proxy_model)
                             
-                            # [更新] 視覺化格式指令 (現代藍色+大字體)
                             formatting_instruction = """
                             【排版特別指令 (Visual Formatting)】
-                            為了讓使用者能一眼識別翻譯結果，請務必遵守以下排版格式：
                             1. 使用 `### 🦅 阿美語翻譯` 作為小標題。
-                            2. **關鍵翻譯句子**：請使用最大的標題級別 `#` 加上 Streamlit 的現代藍色語法 `:blue[...]` 將整句包起來。
-                            3. 範例輸出：
+                            2. **關鍵翻譯句子**：請使用 `#` (H1) 加上 `:blue[...]` (藍色) 將整句包起來，使其最大最顯眼。
+                            3. 範例：
                                ### 🦅 阿美語翻譯
                                # :blue[I 花蓮 kako.]
                                
                                ### 📊 語法分析
-                               (此處接續分析...)
+                               ...
                             """
                             
-                            # 組合 Prompt
-                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。你已經完整閱讀了上述的【全量阿美語資料庫】。\n請根據這些知識，對使用者的輸入進行精確的翻譯、語法結構拆解與深度語意分析。\n請務必遵守【缺詞標記協議】，若遇到資料庫沒有的詞，直接保留中文。\n\n使用者輸入: {user_input}"
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。已閱讀上方【全量資料庫(Compact)】。\n請對使用者輸入進行精確翻譯與分析。\n若資料庫無此詞，請保留中文。\n\n使用者輸入: {user_input}"
                             
-                            # [新增] 自動重試機制 (Auto-Retry for 429 Errors)
+                            # 自動重試機制
                             try:
                                 response = m.generate_content(full_prompt)
                             except Exception as e:
                                 if "429" in str(e):
-                                    st.toast("⏳ 頻率限制 (429)，系統正在休息 10 秒後自動重試...", icon="🛡️")
+                                    st.toast("⏳ 流量調節中 (429)，系統休息 10 秒後自動重試...", icon="🛡️")
                                     time.sleep(10)
                                     response = m.generate_content(full_prompt)
                                 else:
@@ -324,7 +322,7 @@ def assistant_system(api_key, model_selection):
 
     else:
         # ==========================================
-        # 模式 B: 標準 RAG 模式 (原版功能完全保留)
+        # 模式 B: 標準 RAG 模式
         # ==========================================
         actual_model = model_selection
         mode = st.radio("翻譯方向", ["阿美語 ⮕ 中文", "中文 ⮕ 阿美語"], horizontal=True)
@@ -359,7 +357,6 @@ def assistant_system(api_key, model_selection):
                         with st.spinner(f"正在呼叫 {actual_model} ..."):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(actual_model)
-                            # 組合 Prompt
                             final_prompt = f"{r}\n\n{missing_word_protocol}\n\n請根據以上提供的【阿美語語料庫】(Amis Corpus)，對以下句子進行詳細語法與語意分析。\n若遇到資料庫沒有的詞，請依據【缺詞標記協議】保留中文。\n\n使用者輸入: {st.session_state.last_query}"
                             response = m.generate_content(final_prompt)
                             if response:
@@ -378,7 +375,7 @@ def main():
         conn.execute('CREATE TABLE IF NOT EXISTS pos_tags (tag_name TEXT PRIMARY KEY, sort_order INTEGER DEFAULT 0)')
     st.sidebar.title("🦅 系統選單")
     
-    # [新增] 資料庫救援中心 (請務必使用此功能上傳您手邊的 amis_data.db)
+    # [新增] 資料庫救援中心
     with st.sidebar.expander("📂 資料庫救援中心", expanded=True):
         st.warning("⚠️ 警告：若雲端資料遺失，請在此上傳本機備份檔 (.db) 進行還原。")
         uploaded_db = st.file_uploader("上傳 amis_data.db", type=["db"])
@@ -401,14 +398,16 @@ def main():
     
     if key != st.session_state.get("api_key"): 
         st.session_state["api_key"] = key; st.cache_resource.clear(); st.rerun()
+    
+    # 這裡會自動去 Google 查詢可用的模型，所以不管叫什麼名字都能抓到
     raw_ms = get_verified_models(key)
     ms = []
     if raw_ms:
         ms = raw_ms.copy()
-        # [更新] 模型選單加入新的 Pangcah 全庫分析版
         DREAM_MODEL = "🧬 Pangcah/'Amis_language_mode"
         ms.insert(0, DREAM_MODEL)
     model = st.sidebar.selectbox("請選擇 AI 模型", ms, index=0) if ms else None
+    
     st.sidebar.divider()
     page = st.sidebar.radio("功能模式", ["🏠 系統首頁", "◎ AI 智慧助理", "🔐 句型：專家資料庫", "📖 單詞：語料庫管理", "🏷️ 語法標籤管理", "🎓 語料匯出"])
     
