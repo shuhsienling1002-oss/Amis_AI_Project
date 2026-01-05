@@ -57,7 +57,7 @@ if not st.session_state.auth_status:
     st.stop() # ⛔ 【關鍵指令】這裡會強制停止程式，保護下方程式碼不被執行
 
 # ==========================================
-# ⬇️ 以下是您上傳的 100% 原版程式碼 (未做任何修改) ⬇️
+# ⬇️ 以下是您上傳的 100% 原版程式碼 (已依指示修改 Assistant 邏輯) ⬇️
 # ==========================================
 
 # ==========================================
@@ -264,7 +264,7 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
     return full_trans, words_data, sentences_data, rag_prompt
 
 # ==========================================
-# 2. 介面模組 (還原所有說明文字)
+# 2. 介面模組 (已修改：分離翻譯與語法分析)
 # ==========================================
 
 def assistant_system(api_key, model_selection):
@@ -289,8 +289,6 @@ def assistant_system(api_key, model_selection):
         # ==========================================
         
         # [關鍵修正] 自動挑選最佳的 Flash 模型 (Auto-Select)
-        # 邏輯：從 available_models 裡找出名字含 'flash' 的，選第一個。
-        # 這樣不管 Google 叫它 'gemini-1.5-flash' 還是 'gemini-flash-latest'，我們都抓得到。
         flash_models = [m for m in available_models if 'flash' in m]
         if flash_models:
             proxy_model = flash_models[0] # 自動選第一個 Flash 模型
@@ -301,6 +299,9 @@ def assistant_system(api_key, model_selection):
         
         if "pangcah_ready" not in st.session_state: st.session_state.pangcah_ready = False
         if "pangcah_context" not in st.session_state: st.session_state.pangcah_context = ""
+        # 新增 session state 用於分段處理
+        if "last_translation" not in st.session_state: st.session_state.last_translation = ""
+        if "last_input_text" not in st.session_state: st.session_state.last_input_text = ""
 
         if not st.session_state.pangcah_ready:
             st.markdown("#### 1. 準備階段")
@@ -323,17 +324,19 @@ def assistant_system(api_key, model_selection):
             
             user_input = st.text_area("在此輸入您要翻譯或分析的阿美語/中文內容：", height=150)
             
-            if st.button("🦅 送出測試 (執行翻譯或語法分析)", type="primary"):
+            # --- 第一階段：純翻譯 ---
+            if st.button("🦅 執行翻譯 (不含分析)", type="primary"):
                 if not user_input:
                     st.warning("請輸入內容")
                 elif not api_key:
                     st.warning("請設定 Google API Key")
                 else:
                     try:
-                        with st.spinner(f"Pangcah AI 正在思考 (Core: {proxy_model})..."):
+                        with st.spinner(f"Pangcah AI 正在翻譯 (Core: {proxy_model})..."):
                             genai.configure(api_key=api_key)
                             m = genai.GenerativeModel(proxy_model)
                             
+                            # 修正：只要求翻譯，不要求語法分析
                             formatting_instruction = """
                             【排版特別指令 (Visual Formatting)】
                             1. 使用 `### 🦅 阿美語翻譯` 作為小標題。
@@ -341,12 +344,10 @@ def assistant_system(api_key, model_selection):
                             3. 範例：
                                ### 🦅 阿美語翻譯
                                # :blue[I 花蓮 kako.]
-                               
-                               ### 📊 語法分析
-                               ...
+                            4. 注意：**只要給出翻譯結果即可，目前不需要語法分析。**
                             """
                             
-                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。已閱讀上方【全量資料庫(Compact)】。\n請對使用者輸入進行精確翻譯與分析。\n若資料庫無此詞，請保留中文。\n\n使用者輸入: {user_input}"
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。已閱讀上方【全量資料庫(Compact)】。\n請對使用者輸入進行精確翻譯。\n若資料庫無此詞，請保留中文。\n\n使用者輸入: {user_input}"
                             
                             # 自動重試機制
                             try:
@@ -360,9 +361,40 @@ def assistant_system(api_key, model_selection):
                                     raise e
 
                             if response:
-                                st.markdown("### 🦅 Pangcah 模型分析結果：")
-                                st.write(response.text)
+                                st.session_state.last_translation = response.text
+                                st.session_state.last_input_text = user_input
                     except Exception as e: st.error(f"AI 錯誤：{e}")
+
+            # 顯示翻譯結果 (如果有的話)
+            if st.session_state.last_translation:
+                st.markdown("---")
+                st.write(st.session_state.last_translation)
+                
+                # --- 第二階段：手動觸發語法分析 ---
+                st.markdown("#### 🧠 進階指令")
+                if st.button("🔍 執行語法分析"):
+                    try:
+                        with st.spinner("Pangcah AI 正在解析語法結構..."):
+                            genai.configure(api_key=api_key)
+                            m = genai.GenerativeModel(proxy_model)
+                            
+                            analysis_prompt = f"""
+                            {st.session_state.pangcah_context}
+                            
+                            【指令】
+                            使用者原始輸入: "{st.session_state.last_input_text}"
+                            你的翻譯結果: "{st.session_state.last_translation}"
+                            
+                            請針對上述的翻譯結果，進行詳細的【語法與語意分析】。
+                            請解釋句中的詞根、詞綴、格位標記 (如 ko, to, no) 以及語態。
+                            排版請清晰易讀，使用 Markdown list。
+                            """
+                            
+                            response_analysis = m.generate_content(analysis_prompt)
+                            if response_analysis:
+                                st.markdown("### 📊 語法分析報告：")
+                                st.write(response_analysis.text)
+                    except Exception as e: st.error(f"分析錯誤：{e}")
 
     else:
         # ==========================================
