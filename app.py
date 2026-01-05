@@ -213,7 +213,7 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
     return full_trans, words_data, sentences_data, rag_prompt
 
 # ==========================================
-# 2. 介面模組 (已修改：新增對話指令)
+# 2. 介面模組 (已修改：字體調整、雙向翻譯、移除分析)
 # ==========================================
 
 def assistant_system(api_key, model_selection):
@@ -261,7 +261,7 @@ def assistant_system(api_key, model_selection):
             
             user_input = st.text_area("在此輸入您要翻譯或分析的阿美語/中文內容：", height=150)
             
-            # --- 第一階段：純翻譯 ---
+            # --- 第一階段：純翻譯 (雙向 + 字體縮小) ---
             if st.button("🦅 執行翻譯 (不含分析)", type="primary"):
                 if not user_input:
                     st.warning("請輸入內容")
@@ -274,14 +274,15 @@ def assistant_system(api_key, model_selection):
                             m = genai.GenerativeModel(proxy_model)
                             formatting_instruction = """
                             【排版特別指令 (Visual Formatting)】
-                            1. 使用 `### 🦅 阿美語翻譯` 作為小標題。
-                            2. **關鍵翻譯句子**：請使用 `#` (H1) 加上 `:blue[...]` (藍色) 將整句包起來，使其最大最顯眼。
+                            1. 使用 `### 🦅 翻譯結果` 作為小標題。
+                            2. **關鍵翻譯句子**：請使用 `###` (H3) 加上 `:blue[...]` (藍色) 將整句包起來。
+                               (注意：不要使用 `#` H1，請改用 `###` H3 讓字體適中)。
                             3. 範例：
-                               ### 🦅 阿美語翻譯
-                               # :blue[I 花蓮 kako.]
-                            4. 注意：**只要給出翻譯結果即可，目前不需要語法分析。**
+                               ### 🦅 翻譯結果
+                               ### :blue[I 花蓮 kako.]
+                            4. 注意：**只要給出翻譯結果即可，不需要語法分析。**
                             """
-                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。已閱讀上方【全量資料庫(Compact)】。\n請對使用者輸入進行精確翻譯。\n若資料庫無此詞，請保留中文。\n\n使用者輸入: {user_input}"
+                            full_prompt = f"{st.session_state.pangcah_context}\n\n{missing_word_protocol}\n\n{formatting_instruction}\n\n【指令】\n你現在是 Pangcah/'Amis 原生語言模型。已閱讀上方【全量資料庫(Compact)】。\n請對使用者輸入進行精確翻譯。\n**判斷邏輯**：\n- 若輸入為中文，請翻譯成阿美語。\n- 若輸入為阿美語，請翻譯成中文。\n\n若資料庫無此詞，請保留中文。\n\n使用者輸入: {user_input}"
                             try:
                                 response = m.generate_content(full_prompt)
                             except Exception as e:
@@ -299,55 +300,32 @@ def assistant_system(api_key, model_selection):
                 st.markdown("---")
                 st.write(st.session_state.last_translation)
                 
-                # --- 第二階段：進階指令區 (並排顯示) ---
+                # --- 第二階段：進階指令區 (僅保留對話) ---
                 st.markdown("#### 🧠 進階指令")
-                c1, c2 = st.columns(2)
                 
-                # 指令 A：語法分析
-                with c1:
-                    if st.button("🔍 執行語法分析", use_container_width=True):
-                        try:
-                            with st.spinner("Pangcah AI 正在解析語法結構..."):
-                                genai.configure(api_key=api_key)
-                                m = genai.GenerativeModel(proxy_model)
-                                analysis_prompt = f"""
-                                {st.session_state.pangcah_context}
-                                【指令】
-                                使用者原始輸入: "{st.session_state.last_input_text}"
-                                你的翻譯結果: "{st.session_state.last_translation}"
-                                請針對上述的翻譯結果，進行詳細的【語法與語意分析】。
-                                請解釋句中的詞根、詞綴、格位標記 (如 ko, to, no) 以及語態。
-                                排版請清晰易讀，使用 Markdown list。
-                                """
-                                response_analysis = m.generate_content(analysis_prompt)
-                                if response_analysis:
-                                    st.markdown("### 📊 語法分析報告：")
-                                    st.write(response_analysis.text)
-                        except Exception as e: st.error(f"分析錯誤：{e}")
-
-                # 指令 B：聊天回應 (新增)
-                with c2:
-                    if st.button("💬 模擬對話回應", use_container_width=True):
-                        try:
-                            with st.spinner("Pangcah AI 正在思考回應..."):
-                                genai.configure(api_key=api_key)
-                                m = genai.GenerativeModel(proxy_model)
-                                chat_prompt = f"""
-                                {st.session_state.pangcah_context}
-                                【指令】
-                                使用者剛剛說了: "{st.session_state.last_input_text}"
-                                (翻譯/原本意思: "{st.session_state.last_translation}")
-                                
-                                請你扮演一位熱情的阿美族耆老或朋友 (Faki/Fayi)，針對這句話進行「自然的對話回應」。
-                                1. 請用**阿美語**回答 (Amis)。
-                                2. 在阿美語回應下方，附上中文翻譯。
-                                3. 語氣要輕鬆、生活化，像是在聊天。
-                                """
-                                response_chat = m.generate_content(chat_prompt)
-                                if response_chat:
-                                    st.markdown("### 💬 AI 對話回應：")
-                                    st.write(response_chat.text)
-                        except Exception as e: st.error(f"對話錯誤：{e}")
+                # 指令：聊天回應 (保留並加大字體)
+                if st.button("💬 模擬對話回應", use_container_width=True):
+                    try:
+                        with st.spinner("Pangcah AI 正在思考回應..."):
+                            genai.configure(api_key=api_key)
+                            m = genai.GenerativeModel(proxy_model)
+                            chat_prompt = f"""
+                            {st.session_state.pangcah_context}
+                            【指令】
+                            使用者剛剛說了: "{st.session_state.last_input_text}"
+                            (翻譯/原本意思: "{st.session_state.last_translation}")
+                            
+                            請你扮演一位熱情的阿美族耆老或朋友 (Faki/Fayi)，針對這句話進行「自然的對話回應」。
+                            1. 請用**阿美語**回答 (Amis)。
+                            2. 在阿美語回應下方，附上中文翻譯。
+                            3. 語氣要輕鬆、生活化，像是在聊天。
+                            4. **排版要求**：為了讓回應清晰，請將你的阿美語回應內容使用 `###` (H3) 標題格式輸出，使其字體變大 (與上方的翻譯結果一致)。
+                            """
+                            response_chat = m.generate_content(chat_prompt)
+                            if response_chat:
+                                st.markdown("### 💬 AI 對話回應：")
+                                st.write(response_chat.text)
+                    except Exception as e: st.error(f"對話錯誤：{e}")
 
     else:
         actual_model = model_selection
