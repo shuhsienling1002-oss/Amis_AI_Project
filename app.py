@@ -373,7 +373,8 @@ def assistant_system(api_key, model_selection):
 
 def main():
     with sqlite3.connect('amis_data.db') as conn:
-        conn.execute('CREATE TABLE IF NOT EXISTS sentence_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TIMESTAMP, output_sentencepattern_amis TEXT, output_sentencepattern_chinese TEXT, output_sentencepattern_english TEXT)')
+        # 修改：將 output_sentencepattern_english 改為 note
+        conn.execute('CREATE TABLE IF NOT EXISTS sentence_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TIMESTAMP, output_sentencepattern_amis TEXT, output_sentencepattern_chinese TEXT, note TEXT)')
         conn.execute('CREATE TABLE IF NOT EXISTS vocabulary (id INTEGER PRIMARY KEY AUTOINCREMENT, amis TEXT, chinese TEXT, english TEXT, part_of_speech TEXT, note TEXT, created_at TIMESTAMP)')
         conn.execute('CREATE TABLE IF NOT EXISTS pos_tags (tag_name TEXT PRIMARY KEY, sort_order INTEGER DEFAULT 0)')
     st.sidebar.title("🦅 系統選單")
@@ -422,11 +423,14 @@ def main():
     elif page == "🔐 句型：專家資料庫":
         st.title("🔐 專家句型資料庫")
         with st.form("add_new_s"):
-            c1, c2, c3 = st.columns(3); a, c, e = c1.text_input("阿美語"), c2.text_input("中文"), c3.text_input("英語")
+            c1, c2, c3 = st.columns(3)
+            # 修改：將 英語 輸入框改為 備註
+            a, c, n = c1.text_input("阿美語"), c2.text_input("中文"), c3.text_input("備註")
             if st.form_submit_button("➕ 儲存新句型"):
                 if a and c: 
                     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    run_query("INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, output_sentencepattern_english, created_at) VALUES (?,?,?,?)", (a, c, e, now))
+                    # 修改：寫入 note 欄位
+                    run_query("INSERT INTO sentence_pairs (output_sentencepattern_amis, output_sentencepattern_chinese, note, created_at) VALUES (?,?,?,?)", (a, c, n, now))
                     sync_vocabulary(a); reorder_ids("sentence_pairs"); backup_to_github(); st.rerun()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=True)
