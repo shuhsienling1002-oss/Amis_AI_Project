@@ -27,24 +27,20 @@ if "api_key" not in st.session_state:
 if not st.session_state.auth_status:
     st.title("🔒 系統鎖定保護")
     st.markdown("### 'Amis/Pangcah AI 核心系統")
-    st.info("請輸入 Google API Key 以解除鎖定並存取完整功能。")
+    st.info("請輸入系統密碼以解除鎖定並存取完整功能。")
     
-    input_key = st.text_input("API Key", type="password", help="輸入您的 Gemini API Key")
+    input_key = st.text_input("系統密碼", type="password", help="請輸入訪問密碼")
     
     if st.button("🚀 解鎖進入"):
-        if not input_key:
-            st.warning("請輸入金鑰。")
+        if input_key == "836489":
+            st.session_state.auth_status = True
+            # 解鎖後先嘗試載入 secrets 中的 key，若無則留空讓側邊欄處理
+            st.session_state.api_key = st.secrets.get("GOOGLE_API_KEY", "")
+            st.success("✅ 驗證成功！正在啟動核心引擎...")
+            time.sleep(1)
+            st.rerun()
         else:
-            try:
-                genai.configure(api_key=input_key)
-                genai.list_models() 
-                st.session_state.auth_status = True
-                st.session_state.api_key = input_key 
-                st.success("✅ 驗證成功！正在啟動核心引擎...")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ 金鑰無效或連線失敗: {e}")
+            st.error("❌ 密碼錯誤，拒絕存取。")
     st.divider()
     st.caption("🔒 Unauthorized Access Prohibited.")
     st.stop() 
