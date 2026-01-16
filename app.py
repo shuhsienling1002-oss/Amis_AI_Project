@@ -490,9 +490,22 @@ def main():
                     sync_vocabulary(a); reorder_ids("sentence_pairs"); backup_to_github(); st.rerun()
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=True)
-        if st.button("💾 儲存修改"):
-            with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
-            reorder_ids("sentence_pairs"); backup_to_github(); st.rerun()
+        
+        # --- 修改區塊：新增下載按鈕 ---
+        col_save, col_download = st.columns([1, 4])
+        with col_save:
+            if st.button("💾 儲存修改"):
+                with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
+                reorder_ids("sentence_pairs"); backup_to_github(); st.rerun()
+        with col_download:
+            csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下載 Excel/CSV",
+                data=csv_data,
+                file_name=f'amis_sentences_{datetime.now().strftime("%Y%m%d")}.csv',
+                mime='text/csv'
+            )
+        # ----------------------------
 
     elif page == "📖 單詞：語料庫管理":
         st.title("📖 單詞語料庫管理")
@@ -510,9 +523,22 @@ def main():
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM vocabulary ORDER BY id DESC", conn)
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic",
             column_config={"part_of_speech": st.column_config.SelectboxColumn("詞類 (搜尋選單)", options=raw_tags, required=True)})
-        if st.button("💾 儲存修改"):
-            with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
-            reorder_ids("vocabulary"); backup_to_github(); st.rerun()
+        
+        # --- 修改區塊：新增下載按鈕 ---
+        col_save, col_download = st.columns([1, 4])
+        with col_save:
+            if st.button("💾 儲存修改"):
+                with sqlite3.connect('amis_data.db') as conn: edited_df.to_sql('vocabulary', conn, if_exists='replace', index=False)
+                reorder_ids("vocabulary"); backup_to_github(); st.rerun()
+        with col_download:
+            csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下載 Excel/CSV",
+                data=csv_data,
+                file_name=f'amis_vocabulary_{datetime.now().strftime("%Y%m%d")}.csv',
+                mime='text/csv'
+            )
+        # ----------------------------
 
     elif page == "🏷️ 語法標籤管理":
         st.title("🏷️ 標籤管理 (Tag Alignment)")
