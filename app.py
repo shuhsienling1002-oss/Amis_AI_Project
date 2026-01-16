@@ -121,25 +121,40 @@ def backup_to_github():
         st.error(f"⚠️ 連線失敗。請確認 Token 權限。錯誤: {str(e)}")
         return False
 
+# --- 修改點 1: 加入 note 欄位讀取 ---
 def get_full_database_context():
     ctx = "【全量阿美語資料庫 (Compact Mode)】\n"
-    vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary", fetch=True)
+    # 修改：加入 note 欄位
+    vocab = run_query("SELECT amis, chinese, part_of_speech, note FROM vocabulary", fetch=True)
     if vocab:
         ctx += "==VOCABULARY==\n"
         for v in vocab:
             a = v[0] if v[0] else ""
             c = v[1] if v[1] else ""
             p = v[2] if v[2] else ""
-            ctx += f"{a},{c},{p}\n"
-    sents = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs", fetch=True)
+            n = v[3] if v[3] else "" # 讀取備註
+            
+            # 若有備註，加入上下文
+            if n:
+                ctx += f"{a},{c},{p} (備註:{n})\n"
+            else:
+                ctx += f"{a},{c},{p}\n"
+                
+    # 修改：句型也加入 note
+    sents = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese, note FROM sentence_pairs", fetch=True)
     if sents:
         ctx += "\n==SENTENCES==\n"
         for s in sents:
             sa = s[0] if s[0] else ""
             sc = s[1] if s[1] else ""
-            ctx += f"{sa} || {sc}\n"
+            sn = s[2] if s[2] else ""
+            if sn:
+                ctx += f"{sa} || {sc} (Note:{sn})\n"
+            else:
+                ctx += f"{sa} || {sc}\n"
     return ctx
 
+# --- 修改點 2: RAG 檢索加入 note ---
 def get_expert_knowledge(query_text, direction="AtoZ"):
     if not query_text: return None, [], [], "" 
     clean_q = query_text.strip().rstrip('.?!')
@@ -158,18 +173,34 @@ def get_expert_knowledge(query_text, direction="AtoZ"):
                 matched_definitions = [] 
                 should_use_semantic = True
                 if len(word) == 1: should_use_semantic = False
+                
+                # 修改：SQL 加入 note
                 if direction == "AtoZ":
-                    res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                    res_vocab = run_query("SELECT amis, chinese, part_of_speech, note FROM vocabulary WHERE LOWER(amis) LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
                 else:
-                    res_vocab = run_query("SELECT amis, chinese, part_of_speech FROM vocabulary WHERE chinese LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                    res_vocab = run_query("SELECT amis, chinese, part_of_speech, note FROM vocabulary WHERE chinese LIKE ? LIMIT 100", (f"%{word}%",), fetch=True)
+                
                 valid_vocab_count = 0
                 for w in res_vocab:
                     if direction == "AtoZ" and not is_linguistically_relevant(word, w[0]): continue 
                     if valid_vocab_count >= 50: break 
+                    
+                    note_content = w[3] if w[3] else ""
+                    
                     words_data.append({"amis": w[0], "chinese": w[1], "pos": w[2]})
-                    rag_context_parts.append(f"[阿美語資料庫] 阿美語: {w[0]} | 中文: {w[1]} (詞性: {w[2]})")
+                    
+                    # 修改：將備註加入 RAG 提示詞
+                    rag_str = f"[阿美語資料庫] 阿美語: {w[0]} | 中文: {w[1]} (詞性: {w[2]})"
+                    if note_content:
+                        rag_str += f" | 備註: {note_content}"
+                    rag_context_parts.append(rag_str)
+                    
                     if w[1] and should_use_semantic: matched_definitions.append(w[1])
+                    # 增強：備註也可以作為語意搜尋的參考
+                    if note_content and should_use_semantic: matched_definitions.append(note_content)
+                        
                     valid_vocab_count += 1
+                
                 if direction == "AtoZ":
                     res_sent_direct = run_query("SELECT output_sentencepattern_amis, output_sentencepattern_chinese FROM sentence_pairs WHERE LOWER(output_sentencepattern_amis) LIKE ? LIMIT 30", (f"%{word}%",), fetch=True)
                 else:
