@@ -491,7 +491,6 @@ def main():
         with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs ORDER BY id DESC", conn)
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", hide_index=True)
         
-        # --- 修改區塊：新增下載按鈕 ---
         col_save, col_download = st.columns([1, 4])
         with col_save:
             if st.button("💾 儲存修改"):
@@ -499,13 +498,34 @@ def main():
                 reorder_ids("sentence_pairs"); backup_to_github(); st.rerun()
         with col_download:
             csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下載 Excel/CSV",
-                data=csv_data,
-                file_name=f'amis_sentences_{datetime.now().strftime("%Y%m%d")}.csv',
-                mime='text/csv'
-            )
-        # ----------------------------
+            st.download_button("📥 下載 Excel/CSV", csv_data, f'amis_sentences_{datetime.now().strftime("%Y%m%d")}.csv', 'text/csv')
+
+        # --- 新增區塊：上傳覆蓋 ---
+        st.markdown("---")
+        with st.expander("📂 批次匯入/還原 (上傳 CSV)", expanded=False):
+            st.error("⚠️ 危險操作：上傳 CSV 將會【完全覆蓋】並刪除現有的句型資料！")
+            uploaded_csv = st.file_uploader("請選擇要上傳的 CSV 檔 (句型)", type=["csv"])
+            if uploaded_csv is not None:
+                if st.button("🚨 確認覆蓋並匯入句型", type="primary"):
+                    try:
+                        df_upload = pd.read_csv(uploaded_csv)
+                        # 檢查必要欄位
+                        required = ['output_sentencepattern_amis', 'output_sentencepattern_chinese']
+                        if not all(col in df_upload.columns for col in required):
+                            st.error(f"❌ 格式錯誤！CSV 必須包含這些欄位: {required}")
+                        else:
+                            # 補齊欄位
+                            if 'note' not in df_upload.columns: df_upload['note'] = ""
+                            if 'created_at' not in df_upload.columns: df_upload['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            with sqlite3.connect('amis_data.db') as conn:
+                                df_upload.to_sql('sentence_pairs', conn, if_exists='replace', index=False)
+                            reorder_ids("sentence_pairs")
+                            backup_to_github()
+                            st.success(f"✅ 成功匯入 {len(df_upload)} 筆句型！(舊資料已覆蓋)")
+                            time.sleep(2); st.rerun()
+                    except Exception as e:
+                        st.error(f"匯入失敗: {e}")
 
     elif page == "📖 單詞：語料庫管理":
         st.title("📖 單詞語料庫管理")
@@ -524,7 +544,6 @@ def main():
         edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic",
             column_config={"part_of_speech": st.column_config.SelectboxColumn("詞類 (搜尋選單)", options=raw_tags, required=True)})
         
-        # --- 修改區塊：新增下載按鈕 ---
         col_save, col_download = st.columns([1, 4])
         with col_save:
             if st.button("💾 儲存修改"):
@@ -532,13 +551,34 @@ def main():
                 reorder_ids("vocabulary"); backup_to_github(); st.rerun()
         with col_download:
             csv_data = edited_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下載 Excel/CSV",
-                data=csv_data,
-                file_name=f'amis_vocabulary_{datetime.now().strftime("%Y%m%d")}.csv',
-                mime='text/csv'
-            )
-        # ----------------------------
+            st.download_button("📥 下載 Excel/CSV", csv_data, f'amis_vocabulary_{datetime.now().strftime("%Y%m%d")}.csv', 'text/csv')
+
+        # --- 新增區塊：上傳覆蓋 ---
+        st.markdown("---")
+        with st.expander("📂 批次匯入/還原 (上傳 CSV)", expanded=False):
+            st.error("⚠️ 危險操作：上傳 CSV 將會【完全覆蓋】並刪除現有的單詞資料！")
+            uploaded_csv_v = st.file_uploader("請選擇要上傳的 CSV 檔 (單詞)", type=["csv"])
+            if uploaded_csv_v is not None:
+                if st.button("🚨 確認覆蓋並匯入單詞", type="primary"):
+                    try:
+                        df_upload = pd.read_csv(uploaded_csv_v)
+                        # 檢查必要欄位
+                        required = ['amis', 'chinese', 'part_of_speech']
+                        if not all(col in df_upload.columns for col in required):
+                            st.error(f"❌ 格式錯誤！CSV 必須包含這些欄位: {required}")
+                        else:
+                            # 補齊欄位
+                            if 'note' not in df_upload.columns: df_upload['note'] = ""
+                            if 'created_at' not in df_upload.columns: df_upload['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            with sqlite3.connect('amis_data.db') as conn:
+                                df_upload.to_sql('vocabulary', conn, if_exists='replace', index=False)
+                            reorder_ids("vocabulary")
+                            backup_to_github()
+                            st.success(f"✅ 成功匯入 {len(df_upload)} 筆單詞！(舊資料已覆蓋)")
+                            time.sleep(2); st.rerun()
+                    except Exception as e:
+                        st.error(f"匯入失敗: {e}")
 
     elif page == "🏷️ 語法標籤管理":
         st.title("🏷️ 標籤管理 (Tag Alignment)")
@@ -598,10 +638,14 @@ def main():
         with tab1:
             with sqlite3.connect('amis_data.db') as conn: df = pd.read_sql("SELECT * FROM sentence_pairs", conn)
             st.dataframe(df, use_container_width=True)
-            st.download_button("📥 下載 JSONL", df.to_json(orient="records", lines=True, force_ascii=False), "amis_sentences.jsonl")
+            c1, c2 = st.columns(2)
+            with c1: st.download_button("📥 下載 JSONL", df.to_json(orient="records", lines=True, force_ascii=False), "amis_sentences.jsonl")
+            with c2: st.download_button("📊 下載 CSV (Excel)", df.to_csv(index=False).encode('utf-8-sig'), "amis_sentences.csv", "text/csv")
         with tab2:
             with sqlite3.connect('amis_data.db') as conn: df_v = pd.read_sql("SELECT * FROM vocabulary", conn)
             st.dataframe(df_v, use_container_width=True)
-            st.download_button("📥 下載 JSONL", df_v.to_json(orient="records", lines=True, force_ascii=False), "amis_vocabulary.jsonl")
+            c1, c2 = st.columns(2)
+            with c1: st.download_button("📥 下載 JSONL", df_v.to_json(orient="records", lines=True, force_ascii=False), "amis_vocabulary.jsonl")
+            with c2: st.download_button("📊 下載 CSV (Excel)", df_v.to_csv(index=False).encode('utf-8-sig'), "amis_vocabulary.csv", "text/csv")
 
 if __name__ == "__main__": main()
